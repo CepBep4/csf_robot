@@ -7,7 +7,6 @@ env/
 __pycache__/
 *.py[cod]
 *.pyo
-*.xlsx
 
 # IDE
 .idea/

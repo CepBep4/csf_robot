@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
-from turtle import down
 
+from robot_state import is_stop_requested
 from worker.court_tab import court_tab, court_tab_check
 from worker.ip_tab import ip_tab, ip_tab_check
 from worker.search_case import search_case
@@ -18,6 +18,8 @@ STAGE_SWITCH_DELAY = _config.get("delayStageSwitch", 10.0)
 
 "Запуск заполнения 1С"
 def hande_case_by_setting_information_to_1c(data: dict):
+    if is_stop_requested():
+        return "Остановлено по запросу пользователя"
     #Данные для поиска дела
     number_case: int = data.get("number_case")
         
@@ -41,7 +43,8 @@ def hande_case_by_setting_information_to_1c(data: dict):
     #Ищем дело
     sc = search_case(number_case, cooldown=SEARCH_COOLDOWN)
     print(f"Дело: {number_case}\nИнформация: {sc[0]}")
-    
+    if is_stop_requested():
+        return "Остановлено по запросу пользователя"
     if sc[1]:
         #Заполняем вкладку суд
         ct = court_tab(
@@ -57,6 +60,8 @@ def hande_case_by_setting_information_to_1c(data: dict):
             cooldown=COURT_TAB_DELAY,
         )
         print(f"Дело: {number_case}\nИнформация: {ct[0]}")
+        if is_stop_requested():
+            return "Остановлено по запросу пользователя"
         if ct[1]:
             #Заполняем вкладку исполнительное производство
             it = ip_tab(
@@ -83,17 +88,22 @@ def hande_case_by_setting_information_to_1c(data: dict):
 
 "Запуск проверки информации в 1С"
 def hande_case_by_checking_information_from_1c(number_case: str) -> dict:
+    if is_stop_requested():
+        return {}
     data_recieve = {}
     
     #Ищем дело
     sc = search_case(number_case, cooldown=SEARCH_COOLDOWN)
     print(f"Дело: {number_case}\nИнформация: {sc[0]}")
-    
+    if is_stop_requested():
+        return {}
     if sc[1]:
         data_recieve["number_case"] = number_case
         #Заполняем вкладку суд
         ct = court_tab_check(COURT_TAB_DELAY)
         print(f"Дело: {number_case}\nИнформация: {ct[0]}")
+        if is_stop_requested():
+            return data_recieve
         if ct[1]:
             data_recieve.update(ct[2])
             #Заполняем вкладку исполнительное производство
@@ -114,5 +124,9 @@ def hande_case_by_checking_information_from_1c(number_case: str) -> dict:
 
 "Запуск скачивания файлов из 1С"
 def hande_case_by_downloading_information_from_1c(number_case: str):
-    if search_case(number_case)[1]:   
+    if is_stop_requested():
+        return
+    if search_case(number_case)[1]:
+        if is_stop_requested():
+            return
         download_mode(number_case)

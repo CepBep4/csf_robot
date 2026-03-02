@@ -2,5 +2,6 @@
   "delaySearchCase": 0.0,
   "delayCourtTab": 0.0,
   "delayDownloadCases": 180.0,
-  "delayStageSwitch": 10.0
+  "delayStageSwitch": 10.0,
+  "delayBeforeRun": 5
 }

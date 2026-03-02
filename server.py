@@ -10,10 +10,16 @@
 
 import os
 import json
+import threading
 from io import BytesIO, StringIO
 from flask import Flask, jsonify, send_from_directory, request, Response, send_file
 import openpyxl
 import csv
+
+from robot_run import run as run_robot
+from robot_state import request_stop_run
+from robot_payload import normalize_robot_payload
+from robot import validate_before_setting
 
 app = Flask(__name__)
 
@@ -30,6 +36,15 @@ CLIENT_LOG = {
 
 # Результат проверки документа выгрузки: заголовки и строки, которые нельзя обработать
 DOC_CHECK_RESULT = {"headers": [], "cannot_process_rows": []}
+
+# Список дел для запуска робота «Проверить данные 1С» (заполняется при нажатии «Начать»)
+CHECK_1C_CASE_LIST = []
+
+# Список строк для «Заполнить данные 1С» (заполняется при проверке файла в этой панели)
+FILL_1C_DATA_LIST = []
+
+# Список дел для «Загрузить информацию из 1С» (заполняется при нажатии «Начать»)
+LOAD_1C_CASE_LIST = []
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
@@ -135,10 +150,13 @@ ADMIN_HTML = """
       .doc-status { margin: 10px 0; min-height: 1.2em; }
       .doc-counts { margin-top: 20px; }
       .doc-counts button { margin-top: 15px; cursor: pointer; }
-      #docSummary { margin-top: 15px; font-size: 14px; }
+      .doc-summary-block { margin-top: 18px; padding-top: 12px; border-top: 1px solid #e0e0e0; }
+      .doc-summary-title { font-weight: bold; margin-bottom: 8px; font-size: 14px; }
+      #docSummary { margin-top: 8px; font-size: 14px; }
       #docSummary ul { padding-left: 18px; }
       #docSummary li { margin-bottom: 4px; }
       #docSummary li button { margin-left: 8px; }
+      #docValidationErrorsList { padding-left: 18px; margin: 8px 0; font-size: 14px; }
       .nav-btn.nav-btn-red {
         background: #fdecea;
         border-color: #c62828;
@@ -192,17 +210,26 @@ ADMIN_HTML = """
       </div>
       <div class="panel-content">
         <h1>Проверить документ выгрузки</h1>
-        <p>Загрузите xlsx-документ, затем нажмите «Проверить». После проверки отобразится количество дел, которые можно и нельзя обработать.</p>
+        <p>Загрузите xlsx-документ, затем нажмите «Проверить». После проверки отобразится количество дел, которые можно и нельзя обработать, и подробная сводка по проблемным делам.</p>
         <div class="doc-upload-area">
+          <label for="docFile">Файл выгрузки (.xlsx, .xls):</label><br>
           <input type="file" id="docFile" accept=".xlsx,.xls" />
           <button type="button" id="docCheckBtn" class="nav-btn">Проверить</button>
         </div>
         <div id="docCheckStatus" class="doc-status"></div>
         <div id="docCounts" class="doc-counts" style="display:none;">
           <p><strong>Можно обработать:</strong> <span id="docCanProcess">0</span></p>
-          <p><strong>Нельзя обработать:</strong> <span id="docCannotProcess">0</span></p>
-          <button type="button" id="docDownloadBtn" class="nav-btn">Скачать документ с делами, которые нельзя обработать</button>
-          <div id="docSummary"></div>
+          <p><strong>Нельзя обработать (нет обязательных полей):</strong> <span id="docCannotProcess">0</span></p>
+          <div id="docSummaryBlock" class="doc-summary-block">
+            <p class="doc-summary-title">Причины, по которым дела не прошли проверку (обязательные поля):</p>
+            <div id="docSummary"></div>
+            <button type="button" id="docDownloadBtn" class="nav-btn">Скачать все дела без обязательных полей</button>
+          </div>
+          <div id="docValidationSummary" class="doc-summary-block" style="display:none;">
+            <p class="doc-summary-title">Ошибки валидации данных 1С: <span id="docValidationFailed">0</span> дел(а)</p>
+            <ul id="docValidationErrorsList"></ul>
+            <button type="button" id="docDownloadValidationBtn" class="nav-btn">Скачать дела с ошибками валидации</button>
+          </div>
         </div>
       </div>
     </div>
@@ -260,6 +287,10 @@ ADMIN_HTML = """
         <div id="fill1cCounts" class="doc-counts" style="display:none;">
           <p><strong>Будет обработано:</strong> <span id="fill1cCanProcess">0</span></p>
           <p><strong>Не будет обработано:</strong> <span id="fill1cCannotProcess">0</span></p>
+          <div id="fill1cValidationSummary" class="doc-summary" style="display:none;">
+            <p><strong>Ошибки валидации данных 1С:</strong> <span id="fill1cValidationFailed">0</span> дел(а)</p>
+            <ul id="fill1cValidationErrorsList"></ul>
+          </div>
           <button type="button" id="fill1cRunBtn" class="nav-btn">Запустить</button>
           <button type="button" id="fill1cStopBtn" class="nav-btn nav-btn-red" style="display:none;">Остановить</button>
           <div id="fill1cTimer" class="doc-status"></div>
@@ -329,6 +360,10 @@ ADMIN_HTML = """
           <label for="delayStageSwitch">Задержки при переходе между этапами:</label><br>
           <input type="number" id="delayStageSwitch" step="0.1" min="0" style="max-width:200px;">
         </div>
+        <div class="doc-upload-area">
+          <label for="delayBeforeRun">Секунд от нажатия «Запустить» до запуска робота (по умолчанию 60):</label><br>
+          <input type="number" id="delayBeforeRun" step="1" min="0" style="max-width:200px;" placeholder="60">
+        </div>
         <button type="button" id="settingsSaveBtn" class="nav-btn nav-btn-yellow">Сохранить</button>
         <div id="settingsStatus" class="doc-status"></div>
       </div>
@@ -378,8 +413,10 @@ ADMIN_HTML = """
         var delayCourtTab = document.getElementById('delayCourtTab');
         var delayDownloadCases = document.getElementById('delayDownloadCases');
         var delayStageSwitch = document.getElementById('delayStageSwitch');
+        var delayBeforeRun = document.getElementById('delayBeforeRun');
         var settingsSaveBtn = document.getElementById('settingsSaveBtn');
         var settingsStatus = document.getElementById('settingsStatus');
+        var robotDelayBeforeRun = 60;
         var fixMode = document.getElementById('fixMode');
         var fixPath = document.getElementById('fixPath');
         var fixRunBtn = document.getElementById('fixRunBtn');
@@ -394,6 +431,9 @@ ADMIN_HTML = """
                 if (o.data.delayCourtTab != null) delayCourtTab.value = o.data.delayCourtTab;
                 if (o.data.delayDownloadCases != null) delayDownloadCases.value = o.data.delayDownloadCases;
                 if (o.data.delayStageSwitch != null) delayStageSwitch.value = o.data.delayStageSwitch;
+                if (delayBeforeRun && o.data.delayBeforeRun != null) delayBeforeRun.value = o.data.delayBeforeRun;
+                robotDelayBeforeRun = (o.data.delayBeforeRun != null && o.data.delayBeforeRun !== '') ? parseInt(o.data.delayBeforeRun, 10) : 60;
+                if (isNaN(robotDelayBeforeRun) || robotDelayBeforeRun < 0) robotDelayBeforeRun = 60;
               }
             })
             .catch(function(e) {
@@ -407,8 +447,10 @@ ADMIN_HTML = """
               delaySearchCase: delaySearchCase && delaySearchCase.value !== '' ? parseFloat(delaySearchCase.value) : null,
               delayCourtTab: delayCourtTab && delayCourtTab.value !== '' ? parseFloat(delayCourtTab.value) : null,
               delayDownloadCases: delayDownloadCases && delayDownloadCases.value !== '' ? parseFloat(delayDownloadCases.value) : null,
-              delayStageSwitch: delayStageSwitch && delayStageSwitch.value !== '' ? parseFloat(delayStageSwitch.value) : null
+              delayStageSwitch: delayStageSwitch && delayStageSwitch.value !== '' ? parseFloat(delayStageSwitch.value) : null,
+              delayBeforeRun: delayBeforeRun && delayBeforeRun.value !== '' ? parseInt(delayBeforeRun.value, 10) : null
             };
+            if (data.delayBeforeRun != null && !isNaN(data.delayBeforeRun) && data.delayBeforeRun >= 0) robotDelayBeforeRun = data.delayBeforeRun;
             fetch('/settings', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -478,14 +520,16 @@ ADMIN_HTML = """
                   document.getElementById('docCannotProcess').textContent = o.data.cannot_process;
                   docCounts.style.display = 'block';
 
-                  // Сводка по причинам, почему дела не прошли обработку
+                  // Сводка: дела без обязательных полей
                   var rs = o.data.reasons_summary || {};
                   var keys = Object.keys(rs);
                   if (docSummary) {
                     if (!keys.length) {
-                      docSummary.textContent = 'Все необрабатываемые дела не проходят по прочим причинам.';
+                      docSummary.textContent = o.data.cannot_process === 0
+                        ? 'Нет дел без обязательных полей.'
+                        : 'Все необрабатываемые дела не проходят по прочим причинам.';
                     } else {
-                      var html = '<p><strong>Причины, по которым дела не прошли обработку:</strong></p><ul>';
+                      var html = '<ul>';
                       keys.forEach(function(k) {
                         var count = rs[k];
                         html += '<li>' +
@@ -498,7 +542,6 @@ ADMIN_HTML = """
                       html += '</ul>';
                       docSummary.innerHTML = html;
 
-                      // Навесим обработчики на появившиеся кнопки
                       var reasonBtns = docSummary.querySelectorAll('.reason-download-btn');
                       reasonBtns.forEach(function(btn) {
                         btn.addEventListener('click', function() {
@@ -508,6 +551,31 @@ ADMIN_HTML = """
                           }
                         });
                       });
+                    }
+                    if (docDownloadBtn) {
+                      docDownloadBtn.style.display = o.data.cannot_process > 0 ? '' : 'none';
+                    }
+                  }
+
+                  // Сводка: ошибки валидации данных 1С
+                  var validationFailed = o.data.validation_failed || 0;
+                  var docValidationSummary = document.getElementById('docValidationSummary');
+                  var docValidationFailed = document.getElementById('docValidationFailed');
+                  var docValidationErrorsList = document.getElementById('docValidationErrorsList');
+                  if (docValidationSummary && docValidationFailed && docValidationErrorsList) {
+                    if (validationFailed > 0) {
+                      docValidationFailed.textContent = validationFailed;
+                      var ves = o.data.validation_errors_summary || {};
+                      var vesKeys = Object.keys(ves);
+                      docValidationErrorsList.innerHTML = '';
+                      vesKeys.forEach(function(msg) {
+                        var li = document.createElement('li');
+                        li.textContent = msg + ' — ' + ves[msg] + ' дел(а)';
+                        docValidationErrorsList.appendChild(li);
+                      });
+                      docValidationSummary.style.display = 'block';
+                    } else {
+                      docValidationSummary.style.display = 'none';
                     }
                   }
                 } else {
@@ -522,6 +590,12 @@ ADMIN_HTML = """
         if (docDownloadBtn) {
           docDownloadBtn.addEventListener('click', function() {
             window.location.href = '/download-unprocessable-doc';
+          });
+        }
+        var docDownloadValidationBtn = document.getElementById('docDownloadValidationBtn');
+        if (docDownloadValidationBtn) {
+          docDownloadValidationBtn.addEventListener('click', function() {
+            window.location.href = '/download-validation-failed-doc';
           });
         }
 
@@ -580,12 +654,13 @@ ADMIN_HTML = """
 
         if (check1cRunBtn) {
           check1cRunBtn.addEventListener('click', function() {
-            var secondsLeft = 60;
+            var totalSec = (typeof robotDelayBeforeRun === 'number' && robotDelayBeforeRun >= 0) ? robotDelayBeforeRun : 60;
+            var secondsLeft = totalSec;
             if (check1cTimerId !== null) {
               clearInterval(check1cTimerId);
             }
             if (check1cTimer) {
-              check1cTimer.textContent = 'Осталось 60 секунд. Переключитесь на удалённый рабочий стол и не трогайте мышь и клавиатуру.';
+              check1cTimer.textContent = 'Осталось ' + totalSec + ' секунд. Переключитесь на удалённый рабочий стол и не трогайте мышь и клавиатуру.';
             }
             check1cRunBtn.disabled = true;
             if (check1cStopBtn) {
@@ -603,13 +678,29 @@ ADMIN_HTML = """
                 clearInterval(check1cTimerId);
                 check1cTimerId = null;
                 if (check1cTimer) {
-                  check1cTimer.textContent = '60 секунд прошло. Работа робота должна быть завершена, можно продолжать пользоваться компьютером.';
+                  check1cTimer.textContent = totalSec + ' секунд прошло. Запускаю робота...';
                 }
+                fetch('/robot/run', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ mode: 'check' })
+                })
+                  .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }); })
+                  .then(function(o) {
+                    if (check1cTimer) {
+                      check1cTimer.textContent = o.ok
+                        ? totalSec + ' секунд прошло. Робот запущен. Смотрите robot.log.'
+                        : totalSec + ' секунд прошло. Ошибка: ' + (o.data.error || 'неизвестная');
+                    }
+                  })
+                  .catch(function(e) {
+                    if (check1cTimer) {
+                      check1cTimer.textContent = totalSec + ' секунд прошло. Ошибка запуска: ' + e;
+                    }
+                  });
                 check1cRunBtn.disabled = false;
-                if (check1cStopBtn) {
-                  check1cStopBtn.style.display = 'none';
-                }
                 check1cStartBtn && (check1cStartBtn.disabled = false);
+                // Кнопку «Остановить» не скрываем — робот может ещё работать
               }
             }, 1000);
           });
@@ -621,9 +712,13 @@ ADMIN_HTML = """
               clearInterval(check1cTimerId);
               check1cTimerId = null;
             }
-            if (check1cTimer) {
-              check1cTimer.textContent = 'Таймер остановлен. Вы можете при необходимости запустить его снова.';
-            }
+            fetch('/robot/stop', { method: 'POST' })
+              .then(function() {
+                if (check1cTimer) {
+                  check1cTimer.textContent = 'Остановка запрошена. Робот прервёт работу при следующей проверке.';
+                }
+              })
+              .catch(function() {});
             check1cRunBtn && (check1cRunBtn.disabled = false);
             check1cStartBtn && (check1cStartBtn.disabled = false);
             check1cStopBtn.style.display = 'none';
@@ -670,6 +765,26 @@ ADMIN_HTML = """
                   if (fill1cCannotProcess) {
                     fill1cCannotProcess.textContent = o.data.cannot_process;
                   }
+                  var validationFailed = o.data.validation_failed || 0;
+                  var fill1cValidationSummary = document.getElementById('fill1cValidationSummary');
+                  var fill1cValidationFailed = document.getElementById('fill1cValidationFailed');
+                  var fill1cValidationErrorsList = document.getElementById('fill1cValidationErrorsList');
+                  if (fill1cValidationSummary && fill1cValidationFailed && fill1cValidationErrorsList) {
+                    if (validationFailed > 0) {
+                      fill1cValidationFailed.textContent = validationFailed;
+                      var ves = o.data.validation_errors_summary || {};
+                      var vesKeys = Object.keys(ves);
+                      fill1cValidationErrorsList.innerHTML = '';
+                      vesKeys.forEach(function(msg) {
+                        var li = document.createElement('li');
+                        li.textContent = msg + ' — ' + ves[msg] + ' дел(а)';
+                        fill1cValidationErrorsList.appendChild(li);
+                      });
+                      fill1cValidationSummary.style.display = 'block';
+                    } else {
+                      fill1cValidationSummary.style.display = 'none';
+                    }
+                  }
                   if (fill1cCounts) {
                     fill1cCounts.style.display = 'block';
                   }
@@ -685,12 +800,13 @@ ADMIN_HTML = """
 
         if (fill1cRunBtn) {
           fill1cRunBtn.addEventListener('click', function() {
-            var secondsLeft2 = 60;
+            var totalSec2 = (typeof robotDelayBeforeRun === 'number' && robotDelayBeforeRun >= 0) ? robotDelayBeforeRun : 60;
+            var secondsLeft2 = totalSec2;
             if (fill1cTimerId !== null) {
               clearInterval(fill1cTimerId);
             }
             if (fill1cTimer) {
-              fill1cTimer.textContent = 'Осталось 60 секунд. Переключитесь на удалённый рабочий стол и не трогайте мышь и клавиатуру.';
+              fill1cTimer.textContent = 'Осталось ' + totalSec2 + ' секунд. Переключитесь на удалённый рабочий стол и не трогайте мышь и клавиатуру.';
             }
             fill1cRunBtn.disabled = true;
             if (fill1cStopBtn) {
@@ -708,12 +824,27 @@ ADMIN_HTML = """
                 clearInterval(fill1cTimerId);
                 fill1cTimerId = null;
                 if (fill1cTimer) {
-                  fill1cTimer.textContent = '60 секунд прошло. Работа робота по заполнению должна быть завершена, можно продолжать пользоваться компьютером.';
+                  fill1cTimer.textContent = totalSec2 + ' секунд прошло. Запускаю робота...';
                 }
+                fetch('/robot/run', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ mode: 'set' })
+                })
+                  .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }); })
+                  .then(function(o) {
+                    if (fill1cTimer) {
+                      fill1cTimer.textContent = o.ok
+                        ? totalSec2 + ' секунд прошло. Робот запущен. Смотрите robot.log.'
+                        : totalSec2 + ' секунд прошло. Ошибка: ' + (o.data.error || 'неизвестная');
+                    }
+                  })
+                  .catch(function(e) {
+                    if (fill1cTimer) {
+                      fill1cTimer.textContent = totalSec2 + ' секунд прошло. Ошибка запуска: ' + e;
+                    }
+                  });
                 fill1cRunBtn.disabled = false;
-                if (fill1cStopBtn) {
-                  fill1cStopBtn.style.display = 'none';
-                }
                 fill1cStartBtn && (fill1cStartBtn.disabled = false);
               }
             }, 1000);
@@ -726,8 +857,9 @@ ADMIN_HTML = """
               clearInterval(fill1cTimerId);
               fill1cTimerId = null;
             }
+            fetch('/robot/stop', { method: 'POST' }).catch(function() {});
             if (fill1cTimer) {
-              fill1cTimer.textContent = 'Таймер остановлен. Вы можете при необходимости запустить его снова.';
+              fill1cTimer.textContent = 'Остановка запрошена.';
             }
             fill1cRunBtn && (fill1cRunBtn.disabled = false);
             fill1cStartBtn && (fill1cStartBtn.disabled = false);
@@ -818,12 +950,13 @@ ADMIN_HTML = """
 
         if (load1cRunBtn) {
           load1cRunBtn.addEventListener('click', function() {
-            var secondsLeft3 = 60;
+            var totalSec3 = (typeof robotDelayBeforeRun === 'number' && robotDelayBeforeRun >= 0) ? robotDelayBeforeRun : 60;
+            var secondsLeft3 = totalSec3;
             if (load1cTimerId !== null) {
               clearInterval(load1cTimerId);
             }
             if (load1cTimer) {
-              load1cTimer.textContent = 'Осталось 60 секунд. Переключитесь на удалённый рабочий стол и не трогайте мышь и клавиатуру.';
+              load1cTimer.textContent = 'Осталось ' + totalSec3 + ' секунд. Переключитесь на удалённый рабочий стол и не трогайте мышь и клавиатуру.';
             }
             load1cRunBtn.disabled = true;
             if (load1cStopBtn) {
@@ -841,12 +974,27 @@ ADMIN_HTML = """
                 clearInterval(load1cTimerId);
                 load1cTimerId = null;
                 if (load1cTimer) {
-                  load1cTimer.textContent = '60 секунд прошло. Работа робота по загрузке должна быть завершена, можно продолжать пользоваться компьютером.';
+                  load1cTimer.textContent = totalSec3 + ' секунд прошло. Запускаю робота...';
                 }
+                fetch('/robot/run', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ mode: 'download' })
+                })
+                  .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }); })
+                  .then(function(o) {
+                    if (load1cTimer) {
+                      load1cTimer.textContent = o.ok
+                        ? totalSec3 + ' секунд прошло. Робот запущен. Смотрите robot.log.'
+                        : totalSec3 + ' секунд прошло. Ошибка: ' + (o.data.error || 'неизвестная');
+                    }
+                  })
+                  .catch(function(e) {
+                    if (load1cTimer) {
+                      load1cTimer.textContent = totalSec3 + ' секунд прошло. Ошибка запуска: ' + e;
+                    }
+                  });
                 load1cRunBtn.disabled = false;
-                if (load1cStopBtn) {
-                  load1cStopBtn.style.display = 'none';
-                }
                 load1cStartBtn && (load1cStartBtn.disabled = false);
               }
             }, 1000);
@@ -859,8 +1007,9 @@ ADMIN_HTML = """
               clearInterval(load1cTimerId);
               load1cTimerId = null;
             }
+            fetch('/robot/stop', { method: 'POST' }).catch(function() {});
             if (load1cTimer) {
-              load1cTimer.textContent = 'Таймер остановлен. Вы можете при необходимости запустить его снова.';
+              load1cTimer.textContent = 'Остановка запрошена.';
             }
             load1cRunBtn && (load1cRunBtn.disabled = false);
             load1cStartBtn && (load1cStartBtn.disabled = false);
@@ -1033,6 +1182,7 @@ def check_simple_list():
     и просто считает количество дел по столбцу
     'ID дела  (ID/ номер убытка)'.
     """
+    global LOAD_1C_CASE_LIST
     id_field = "ID дела  (ID/ номер убытка)"
 
     # Вариант 1: пришёл файл (xlsx) — считаем по столбцу ID дела
@@ -1055,31 +1205,32 @@ def check_simple_list():
                 400,
             )
 
-        # Считаем только строки, где ID не пустой
-        count = 0
+        # Считаем только строки, где ID не пустой, и сохраняем для запуска робота
+        load_case_list = []
         for row in rows:
             val = row.get(id_field)
             if val is not None and str(val).strip() != "":
-                count += 1
-        return jsonify({"ok": True, "total": count})
+                load_case_list.append({"number_case": str(val).strip()})
+        LOAD_1C_CASE_LIST = load_case_list
+        return jsonify({"ok": True, "total": len(load_case_list)})
 
     # Вариант 2: пришёл только текст, скопированный из Excel.
     pasted = request.form.get("pasted_text", "").strip()
     if not pasted:
         return jsonify({"error": "Не передан файл или текст со списком дел."}), 400
 
-    lines = [line for line in pasted.splitlines() if line.strip()]
-    if not lines:
-        return jsonify({"ok": True, "total": 0})
-
-    # Если первая строка выглядит как заголовок (содержит 'ID дела'), не считаем её как дело.
-    first = lines[0]
-    if "ID дела" in first:
-        total = max(len(lines) - 1, 0)
+    headers_pt, rows_pt = _parse_pasted_table(pasted)
+    load_case_list = []
+    if id_field in headers_pt:
+        for row in rows_pt:
+            val = row.get(id_field)
+            if val is not None and str(val).strip() != "":
+                load_case_list.append({"number_case": str(val).strip()})
     else:
-        total = len(lines)
-
-    return jsonify({"ok": True, "total": total})
+        # Нет столбца ID — считаем по количеству строк (без заголовка)
+        load_case_list = [{"number_case": str(i)} for i in range(len(rows_pt))] if rows_pt else []
+    LOAD_1C_CASE_LIST = load_case_list
+    return jsonify({"ok": True, "total": len(load_case_list)})
 
 
 REQUIRED_DOC_FIELDS = [
@@ -1109,10 +1260,10 @@ def _is_empty_value(value):
 def _check_doc_required_fields(rows):
     """
     Проверяет, что в каждой строке (деле) заполнены обязательные поля из REQUIRED_DOC_FIELDS.
-    Возвращает (can_process_count, cannot_process_rows).
-    Строки, в которых отсутствуют или пустые обязательные поля, попадают в cannot_process_rows.
+    Возвращает (can_process_count, cannot_process_rows, can_process_rows).
     """
     cannot_rows = []
+    can_process_rows = []
     for row in rows:
         missing_fields = []
         for field in REQUIRED_DOC_FIELDS:
@@ -1120,12 +1271,11 @@ def _check_doc_required_fields(rows):
                 missing_fields.append(field)
         if missing_fields:
             row_copy = dict(row)
-            # Список обязательных полей, из-за отсутствия/пустоты которых дело нельзя обработать
             row_copy["_missing_required_fields"] = missing_fields
             cannot_rows.append(row_copy)
-
-    can_process_count = len(rows) - len(cannot_rows)
-    return can_process_count, cannot_rows
+        else:
+            can_process_rows.append(dict(row))
+    return len(can_process_rows), cannot_rows, can_process_rows
 
 
 def _build_unprocessable_summary(cannot_rows):
@@ -1146,11 +1296,38 @@ def _build_unprocessable_summary(cannot_rows):
     return summary
 
 
+def _validate_fill1c_rows(can_process_rows):
+    """
+    Проверяет строки для «Заполнить данные 1С» через validate_before_setting.
+    Возвращает (valid_rows, validation_failed_rows, validation_summary).
+    validation_failed_rows — список dict с ключом _validation_error (текст ошибки).
+    validation_summary — {текст_ошибки: количество}.
+    """
+    valid_rows = []
+    validation_failed_rows = []
+    for row in can_process_rows:
+        try:
+            case = normalize_robot_payload("set", row)
+            validate_before_setting(case)
+            valid_rows.append(row)
+        except Exception as e:
+            row_copy = dict(row)
+            err_msg = str(e).strip() or "Ошибка валидации"
+            row_copy["_validation_error"] = err_msg
+            validation_failed_rows.append(row_copy)
+    summary = {}
+    for row in validation_failed_rows:
+        msg = row.get("_validation_error") or "Ошибка валидации"
+        summary[msg] = summary.get(msg, 0) + 1
+    return valid_rows, validation_failed_rows, summary
+
+
 @app.route("/check-doc-upload", methods=["POST"])
 def check_doc_upload():
     """
     Принимает xlsx-файл, проверяет его, возвращает кол-во обрабатываемых и необрабатываемых.
-    Сохраняет необрабатываемые строки для скачивания.
+    Строки с заполненными обязательными полями дополнительно проходят валидацию validate_before_setting.
+    Сохраняет необрабатываемые строки и строки с ошибками валидации для скачивания.
     """
     global DOC_CHECK_RESULT
     if "document" not in request.files:
@@ -1164,15 +1341,24 @@ def check_doc_upload():
         return jsonify({"error": f"Ошибка чтения файла: {e}"}), 400
     if not headers:
         return jsonify({"error": "Файл пустой или без заголовков"}), 400
-    can_process, cannot_rows = _check_doc_required_fields(rows)
-    DOC_CHECK_RESULT = {"headers": headers, "cannot_process_rows": cannot_rows}
+    can_process, cannot_rows, can_process_rows = _check_doc_required_fields(rows)
+    valid_rows, validation_failed_rows, validation_summary = _validate_fill1c_rows(can_process_rows)
+    global FILL_1C_DATA_LIST
+    FILL_1C_DATA_LIST = valid_rows
+    DOC_CHECK_RESULT = {
+        "headers": headers,
+        "cannot_process_rows": cannot_rows,
+        "validation_failed_rows": validation_failed_rows,
+    }
     summary = _build_unprocessable_summary(cannot_rows)
     return jsonify(
         {
             "ok": True,
-            "can_process": can_process,
+            "can_process": len(valid_rows),
             "cannot_process": len(cannot_rows),
+            "validation_failed": len(validation_failed_rows),
             "reasons_summary": summary,
+            "validation_errors_summary": validation_summary,
         }
     )
 
@@ -1209,12 +1395,17 @@ def check_doc_upload_ids_only():
 
     can_process = 0
     cannot_process = 0
+    case_list = []
     for row in rows:
         val = row.get(id_field)
         if _is_empty_value(val):
             cannot_process += 1
         else:
             can_process += 1
+            case_list.append({"number_case": str(val).strip()})
+
+    global CHECK_1C_CASE_LIST
+    CHECK_1C_CASE_LIST = case_list
 
     return jsonify(
         {
@@ -1306,6 +1497,39 @@ def download_unprocessable_doc_by_reason():
     )
 
 
+@app.route("/download-validation-failed-doc", methods=["GET"])
+def download_validation_failed_doc():
+    """Отдаёт xlsx с делами, не прошедшими валидацию данных 1С (из последней проверки)."""
+    global DOC_CHECK_RESULT
+    headers = DOC_CHECK_RESULT.get("headers") or []
+    rows = DOC_CHECK_RESULT.get("validation_failed_rows") or []
+    if not rows:
+        return jsonify(
+            {"error": "Нет дел с ошибками валидации для скачивания. Сначала выполните проверку документа."}
+        ), 404
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Ошибки валидации"
+    # Заголовки: оригинальные + колонка с текстом ошибки
+    extra_col = "Ошибка валидации"
+    for c, h in enumerate(headers, 1):
+        ws.cell(row=1, column=c, value=h)
+    ws.cell(row=1, column=len(headers) + 1, value=extra_col)
+    for r, row_dict in enumerate(rows, 2):
+        for c, h in enumerate(headers, 1):
+            ws.cell(row=r, column=c, value=row_dict.get(h, ""))
+        ws.cell(row=r, column=len(headers) + 1, value=row_dict.get("_validation_error", ""))
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return send_file(
+        buf,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        as_attachment=True,
+        download_name="дела_ошибки_валидации_1С.xlsx",
+    )
+
+
 @app.route("/settings", methods=["GET", "POST"])
 def settings():
     """
@@ -1321,6 +1545,7 @@ def settings():
                 "delayCourtTab": cfg.get("delayCourtTab"),
                 "delayDownloadCases": cfg.get("delayDownloadCases"),
                 "delayStageSwitch": cfg.get("delayStageSwitch"),
+                "delayBeforeRun": cfg.get("delayBeforeRun"),
             }
         )
 
@@ -1335,10 +1560,20 @@ def settings():
         except (TypeError, ValueError):
             return None
 
+    def _to_int_or_none(value, default=None):
+        if value is None:
+            return default
+        try:
+            n = int(value)
+            return n if n >= 0 else default
+        except (TypeError, ValueError):
+            return default
+
     cfg["delaySearchCase"] = _to_float_or_none(data.get("delaySearchCase"))
     cfg["delayCourtTab"] = _to_float_or_none(data.get("delayCourtTab"))
     cfg["delayDownloadCases"] = _to_float_or_none(data.get("delayDownloadCases"))
     cfg["delayStageSwitch"] = _to_float_or_none(data.get("delayStageSwitch"))
+    cfg["delayBeforeRun"] = _to_int_or_none(data.get("delayBeforeRun"), 60)
 
     try:
         save_config(cfg)
@@ -1346,6 +1581,49 @@ def settings():
         return jsonify({"ok": False, "error": f"Не удалось сохранить настройки: {e}"}), 500
 
     return jsonify({"ok": True})
+
+
+@app.route("/robot/run", methods=["POST"])
+def robot_run():
+    """
+    Запуск робота из фронта. Тело запроса: {"mode": "check"|"set"|"download"|"change_filename", "data": ...}.
+    data нормализуется под выбранный режим и передаётся в run_robot(mode, data).
+    Для mode "check" без data используется список дел из последней проверки (кнопка «Начать»).
+    """
+    global CHECK_1C_CASE_LIST, FILL_1C_DATA_LIST, LOAD_1C_CASE_LIST
+    body = request.get_json(silent=True) or {}
+    mode = (body.get("mode") or "").strip()
+    raw_data = body.get("data")
+    if mode not in ("check", "set", "download", "change_filename"):
+        return jsonify({"ok": False, "error": f"Неизвестный режим: {mode!r}"}), 400
+    if mode == "check" and (raw_data is None or (isinstance(raw_data, list) and len(raw_data) == 0)):
+        raw_data = CHECK_1C_CASE_LIST
+    if mode == "set" and (raw_data is None or (isinstance(raw_data, list) and len(raw_data) == 0)):
+        raw_data = FILL_1C_DATA_LIST
+    if mode == "download" and (raw_data is None or (isinstance(raw_data, list) and len(raw_data) == 0)):
+        raw_data = LOAD_1C_CASE_LIST
+    if mode == "check" and (not raw_data or len(raw_data) == 0):
+        return jsonify({"ok": False, "error": "Нет дел для проверки. Сначала нажмите «Начать» и загрузите файл с делами."}), 400
+    if mode == "set" and (not raw_data or len(raw_data) == 0):
+        return jsonify({"ok": False, "error": "Нет данных для заполнения. Сначала нажмите «Начать» и загрузите файл с данными."}), 400
+    if mode == "download" and (not raw_data or len(raw_data) == 0):
+        return jsonify({"ok": False, "error": "Нет дел для загрузки. Сначала нажмите «Начать» и загрузите файл или вставьте данные."}), 400
+    data = normalize_robot_payload(mode, raw_data if raw_data is not None else {})
+    def run_in_thread():
+        try:
+            run_robot(mode, data)
+        except Exception:
+            pass
+    t = threading.Thread(target=run_in_thread, daemon=True)
+    t.start()
+    return jsonify({"ok": True, "running": True})
+
+
+@app.route("/robot/stop", methods=["POST"])
+def robot_stop():
+    """Запрос остановки текущего запуска робота."""
+    request_stop_run()
+    return jsonify({"ok": True, "stopping": True})
 
 
 @app.route("/health")

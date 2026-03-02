@@ -1,0 +1,14 @@
+2026-03-02 22:16:20,047 [INFO] Старт: mode=set
+2026-03-02 22:16:20,047 [INFO] Старт: mode=set
+2026-03-02 22:16:20,050 [INFO] None
+2026-03-02 22:16:20,051 [INFO] None
+2026-03-02 22:16:20,051 [INFO] None
+2026-03-02 22:16:20,051 [INFO] Завершено: mode=set
+2026-03-02 22:16:20,051 [INFO] Завершено: mode=set
+2026-03-02 22:16:54,158 [INFO] Старт: mode=set
+2026-03-02 22:16:54,159 [INFO] Старт: mode=set
+2026-03-02 22:16:54,161 [INFO] {'number_case': '18-027367', 'name_defedant': 'Гараджаев Турал Телман оглы', 'court': 'Люблинский суд Москвы (новый)', 'date_base': '26.03.2024', 'date_plus_mounth': '26.04.2024', 'result_case': 'удп', 'summ_requests_s': 299130.32, 'summ_real_s': 299130.32, 'summ_requests_g': 6191.0, 'summ_real_g': 6191.0, 'view_ip_list': 'Оригинал исполнительного листа', 'number_ip_list': 'ФС №046884880', 'summ': 210400.0, 'data_get_ip_list': '11.09.2024'}
+2026-03-02 22:16:54,162 [INFO] {'number_case': '40-002408', 'name_defedant': 'Фадеева Татьяна Викторовна', 'court': 'Суд участок №2 Сосновского р-на Челябинской обл.', 'date_base': '13.11.2023', 'date_plus_mounth': '13.12.2023', 'result_case': 'удп', 'summ_requests_s': 20000.0, 'summ_real_s': 20000.0, 'summ_requests_g': 800.0, 'summ_real_g': 800.0, 'view_ip_list': 'Оригинал исполнительного листа', 'number_ip_list': 'ФС №876475', 'summ': 20000.0, 'data_get_ip_list': '26.12.2023'}
+2026-03-02 22:16:54,162 [INFO] {'number_case': '02-002200', 'name_defedant': 'Алиев Расул Алиевич', 'court': 'Слободской суд Кировской области', 'date_base': '26.12.2023', 'date_plus_mounth': '26.01.2024', 'result_case': 'удп', 'summ_requests_s': 86300.0, 'summ_real_s': 86300.0, 'summ_requests_g': 2789.0, 'summ_real_g': 2789.0, 'view_ip_list': 'Оригинал исполнительного листа', 'number_ip_list': 'ФС №045025221', 'summ': 86300.0, 'data_get_ip_list': '09.03.2024'}
+2026-03-02 22:16:54,162 [INFO] Завершено: mode=set
+2026-03-02 22:16:54,162 [INFO] Завершено: mode=set

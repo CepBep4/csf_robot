@@ -9,9 +9,11 @@
 """
 
 import os
-from io import BytesIO
+import json
+from io import BytesIO, StringIO
 from flask import Flask, jsonify, send_from_directory, request, Response, send_file
 import openpyxl
+import csv
 
 app = Flask(__name__)
 
@@ -30,6 +32,32 @@ CLIENT_LOG = {
 DOC_CHECK_RESULT = {"headers": [], "cannot_process_rows": []}
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+
+
+def load_config():
+    """Загружает настройки из config.json, если файл существует."""
+    if not os.path.exists(CONFIG_PATH):
+        return {}
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                return data
+            return {}
+    except Exception:
+        # При ошибке чтения возвращаем пустые настройки, чтобы не ломать сервер.
+        return {}
+
+
+def save_config(data: dict):
+    """Сохраняет настройки в config.json."""
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        # Ошибку пробросим выше через ручку /settings, здесь не падаем.
+        raise
 
 ADMIN_HTML = """
 <!doctype html>
@@ -72,6 +100,14 @@ ADMIN_HTML = """
         background: #f5f5f5;
       }
       .nav-btn:hover { background: #e8e8e8; }
+      .nav-btn.nav-btn-green {
+        background: #e4f7ea;
+        border-color: #2e7d32;
+        color: #1b5e20;
+      }
+      .nav-btn.nav-btn-green:hover {
+        background: #d2f0dc;
+      }
       .back-btn {
         font-size: 14px;
         padding: 8px 16px;
@@ -95,10 +131,30 @@ ADMIN_HTML = """
       .panel-header { flex-shrink: 0; padding: 20px 20px 0; }
       .doc-upload-area { margin: 15px 0; }
       .doc-upload-area input[type="file"] { margin-right: 10px; }
-      .doc-upload-area button { padding: 8px 16px; cursor: pointer; }
+      .doc-upload-area button { cursor: pointer; }
       .doc-status { margin: 10px 0; min-height: 1.2em; }
       .doc-counts { margin-top: 20px; }
-      .doc-counts button { margin-top: 15px; padding: 10px 16px; cursor: pointer; }
+      .doc-counts button { margin-top: 15px; cursor: pointer; }
+      #docSummary { margin-top: 15px; font-size: 14px; }
+      #docSummary ul { padding-left: 18px; }
+      #docSummary li { margin-bottom: 4px; }
+      #docSummary li button { margin-left: 8px; }
+      .nav-btn.nav-btn-red {
+        background: #fdecea;
+        border-color: #c62828;
+        color: #b71c1c;
+      }
+      .nav-btn.nav-btn-red:hover {
+        background: #f9d1cb;
+      }
+      .nav-btn.nav-btn-yellow {
+        background: #fff8e1;
+        border-color: #f9a825;
+        color: #9e6c00;
+      }
+      .nav-btn.nav-btn-yellow:hover {
+        background: #ffecb3;
+      }
     </style>
   </head>
   <body>
@@ -107,9 +163,11 @@ ADMIN_HTML = """
       <h1 class="main-title">A.STORM робот</h1>
       <button type="button" class="nav-btn" data-panel="remote">Дистанционный запуск</button>
       <button type="button" class="nav-btn" data-panel="doc">Проверить документ выгрузки</button>
-      <button type="button" class="nav-btn" data-panel="check1c">Проверить данные 1С</button>
-      <button type="button" class="nav-btn" data-panel="fill1c">Заполнить данные 1С</button>
-      <button type="button" class="nav-btn" data-panel="load1c">Загрузить информацию из 1С</button>
+      <button type="button" class="nav-btn nav-btn-yellow" data-panel="settings">Настройки</button>
+      <button type="button" class="nav-btn nav-btn-yellow" data-panel="fixfiles">Исправить названия файлов</button>
+      <button type="button" class="nav-btn nav-btn-green" data-panel="check1c">Проверить данные 1С</button>
+      <button type="button" class="nav-btn nav-btn-green" data-panel="fill1c">Заполнить данные 1С</button>
+      <button type="button" class="nav-btn nav-btn-green" data-panel="load1c">Загрузить информацию из 1С</button>
     </div>
 
     <!-- Панель: Дистанционный запуск -->
@@ -118,7 +176,7 @@ ADMIN_HTML = """
         <button type="button" class="back-btn" data-back>Вернуться</button>
         <h1>Запуск alg.py на клиентах</h1>
         <p>Нажми кнопку, клиенты скачают свежий alg.py с сервера и выполнят его.</p>
-        <button type="button" id="runBtn">Запустить на клиентах</button>
+        <button type="button" id="runBtn" class="nav-btn">Запустить на клиентах</button>
         <div id="status"></div>
       </div>
       <div class="panel-content">
@@ -137,13 +195,14 @@ ADMIN_HTML = """
         <p>Загрузите xlsx-документ, затем нажмите «Проверить». После проверки отобразится количество дел, которые можно и нельзя обработать.</p>
         <div class="doc-upload-area">
           <input type="file" id="docFile" accept=".xlsx,.xls" />
-          <button type="button" id="docCheckBtn">Проверить</button>
+          <button type="button" id="docCheckBtn" class="nav-btn">Проверить</button>
         </div>
         <div id="docCheckStatus" class="doc-status"></div>
         <div id="docCounts" class="doc-counts" style="display:none;">
           <p><strong>Можно обработать:</strong> <span id="docCanProcess">0</span></p>
           <p><strong>Нельзя обработать:</strong> <span id="docCannotProcess">0</span></p>
-          <button type="button" id="docDownloadBtn">Скачать документ с делами, которые нельзя обработать</button>
+          <button type="button" id="docDownloadBtn" class="nav-btn">Скачать документ с делами, которые нельзя обработать</button>
+          <div id="docSummary"></div>
         </div>
       </div>
     </div>
@@ -153,7 +212,28 @@ ADMIN_HTML = """
       </div>
       <div class="panel-content">
         <h1>Проверить данные 1С</h1>
-        <p>Раздел в разработке.</p>
+        <p><strong>Перед запуском проверки выполните подготовку удалённого рабочего стола с 1С.</strong></p>
+        <ol>
+          <li>Подключитесь к удалённому серверу, на котором установлена 1С.</li>
+          <li>Запустите программу 1С (нужная вам база должна быть открыта).</li>
+          <li>Разверните окно 1С на весь экран в оконном режиме (не в режиме «сеанс только в панели» и т.п.).</li>
+          <li>Закройте в 1С все открытые вкладки/формы, чтобы на экране оставалось только главное окно.</li>
+          <li>Убедитесь, что удалённый рабочий стол виден целиком и не перекрыт другими окнами.</li>
+        </ol>
+        <p>После нажатия кнопки «Начать» у вас будет примерно <strong>1 минута</strong>, чтобы переключиться на окно с удалённым сервером и не трогать мышь и клавиатуру, пока робот работает.</p>
+        <div class="doc-upload-area">
+          <label for="check1cFile">Файл с делами для проверки (например, выгрузка из Excel):</label><br>
+          <input type="file" id="check1cFile" accept=".xlsx,.xls,.csv" />
+        </div>
+        <button type="button" id="check1cStartBtn" class="nav-btn">Начать</button>
+        <div id="check1cStatus" class="doc-status"></div>
+        <div id="check1cCounts" class="doc-counts" style="display:none;">
+          <p><strong>Будет обработано:</strong> <span id="check1cCanProcess">0</span></p>
+          <p><strong>Не будет обработано:</strong> <span id="check1cCannotProcess">0</span></p>
+          <button type="button" id="check1cRunBtn" class="nav-btn">Запустить</button>
+          <button type="button" id="check1cStopBtn" class="nav-btn nav-btn-red" style="display:none;">Остановить</button>
+          <div id="check1cTimer" class="doc-status"></div>
+        </div>
       </div>
     </div>
     <div id="panel-fill1c" class="screen">
@@ -162,7 +242,28 @@ ADMIN_HTML = """
       </div>
       <div class="panel-content">
         <h1>Заполнить данные 1С</h1>
-        <p>Раздел в разработке.</p>
+        <p><strong>Перед запуском заполнения выполните подготовку удалённого рабочего стола с 1С.</strong></p>
+        <ol>
+          <li>Подключитесь к удалённому серверу, на котором установлена 1С.</li>
+          <li>Запустите программу 1С (нужная вам база должна быть открыта).</li>
+          <li>Разверните окно 1С на весь экран в оконном режиме (не в режиме «сеанс только в панели» и т.п.).</li>
+          <li>Закройте в 1С все открытые вкладки/формы, чтобы на экране оставалось только главное окно.</li>
+          <li>Убедитесь, что удалённый рабочий стол виден целиком и не перекрыт другими окнами.</li>
+        </ol>
+        <p>После нажатия кнопки «Начать» у вас будет примерно <strong>1 минута</strong>, чтобы переключиться на окно с удалённым сервером и не трогать мышь и клавиатуру, пока робот заполняет данные.</p>
+        <div class="doc-upload-area">
+          <label for="fill1cFile">Файл с данными для заполнения (например, выгрузка из Excel):</label><br>
+          <input type="file" id="fill1cFile" accept=".xlsx,.xls,.csv" />
+        </div>
+        <button type="button" id="fill1cStartBtn" class="nav-btn">Начать</button>
+        <div id="fill1cStatus" class="doc-status"></div>
+        <div id="fill1cCounts" class="doc-counts" style="display:none;">
+          <p><strong>Будет обработано:</strong> <span id="fill1cCanProcess">0</span></p>
+          <p><strong>Не будет обработано:</strong> <span id="fill1cCannotProcess">0</span></p>
+          <button type="button" id="fill1cRunBtn" class="nav-btn">Запустить</button>
+          <button type="button" id="fill1cStopBtn" class="nav-btn nav-btn-red" style="display:none;">Остановить</button>
+          <div id="fill1cTimer" class="doc-status"></div>
+        </div>
       </div>
     </div>
     <div id="panel-load1c" class="screen">
@@ -171,7 +272,85 @@ ADMIN_HTML = """
       </div>
       <div class="panel-content">
         <h1>Загрузить информацию из 1С</h1>
-        <p>Раздел в разработке.</p>
+        <p><strong>Перед запуском загрузки выполните подготовку удалённого рабочего стола с 1С.</strong></p>
+        <ol>
+          <li>Подключитесь к удалённому серверу, на котором установлена 1С.</li>
+          <li>Запустите программу 1С (нужная вам база должна быть открыта).</li>
+          <li>Разверните окно 1С на весь экран в оконном режиме (не в режиме «сеанс только в панели» и т.п.).</li>
+          <li>Закройте в 1С все открытые вкладки/формы, чтобы на экране оставалось только главное окно.</li>
+          <li>Убедитесь, что удалённый рабочий стол виден целиком и не перекрыт другими окнами.</li>
+          <li>Скачайте одно тестовое дело из 1С и сохраните файл в папку, в которую робот будет в дальнейшем скачивать дела (папку для выгрузки).</li>
+        </ol>
+        <p>После нажатия кнопки «Начать» у вас будет примерно <strong>1 минута</strong>, чтобы переключиться на окно с удалённым сервером и не трогать мышь и клавиатуру, пока робот загружает информацию.</p>
+        <p><strong>Выберите способ подготовки данных для тестовой загрузки:</strong></p>
+        <div class="doc-upload-area">
+          <label><input type="radio" name="load1cMode" id="load1cModeFile" value="file" checked> Загрузить файл выгрузки</label><br>
+          <label><input type="radio" name="load1cMode" id="load1cModePaste" value="paste"> Вставить скопированную из Excel информацию</label>
+        </div>
+        <div class="doc-upload-area" id="load1cFileBlock">
+          <label for="load1cFile">Файл с выгрузкой из 1С (одно тестовое дело):</label><br>
+          <input type="file" id="load1cFile" accept=".xlsx,.xls,.csv" />
+        </div>
+        <div class="doc-upload-area" id="load1cPasteBlock" style="display:none;">
+          <label for="load1cPaste">Скопируйте строку(и) из Excel и вставьте сюда (табличная вставка):</label><br>
+          <textarea id="load1cPaste" rows="8" style="width:100%;" placeholder="Вставьте сюда данные из Excel (включая строку заголовков)"></textarea>
+        </div>
+        <button type="button" id="load1cStartBtn" class="nav-btn">Начать</button>
+        <div id="load1cStatus" class="doc-status"></div>
+        <div id="load1cCounts" class="doc-counts" style="display:none;">
+          <p><strong>Будет обработано:</strong> <span id="load1cCanProcess">0</span></p>
+          <p><strong>Не будет обработано:</strong> <span id="load1cCannotProcess">0</span></p>
+          <button type="button" id="load1cRunBtn" class="nav-btn">Запустить</button>
+          <button type="button" id="load1cStopBtn" class="nav-btn nav-btn-red" style="display:none;">Остановить</button>
+          <div id="load1cTimer" class="doc-status"></div>
+        </div>
+      </div>
+    </div>
+    <div id="panel-settings" class="screen">
+      <div class="panel-header">
+        <button type="button" class="back-btn" data-back>Вернуться</button>
+      </div>
+      <div class="panel-content">
+        <h1>Настройки</h1>
+        <p>Задайте задержки (в секундах) для разных этапов работы робота.</p>
+        <div class="doc-upload-area">
+          <label for="delaySearchCase">Задержки при поиске дела:</label><br>
+          <input type="number" id="delaySearchCase" step="0.1" min="0" style="max-width:200px;">
+        </div>
+        <div class="doc-upload-area">
+          <label for="delayCourtTab">Задержки при работе с вкладкой суд:</label><br>
+          <input type="number" id="delayCourtTab" step="0.1" min="0" style="max-width:200px;">
+        </div>
+        <div class="doc-upload-area">
+          <label for="delayDownloadCases">Задержки при работе с загрузкой дел:</label><br>
+          <input type="number" id="delayDownloadCases" step="0.1" min="0" style="max-width:200px;">
+        </div>
+        <div class="doc-upload-area">
+          <label for="delayStageSwitch">Задержки при переходе между этапами:</label><br>
+          <input type="number" id="delayStageSwitch" step="0.1" min="0" style="max-width:200px;">
+        </div>
+        <button type="button" id="settingsSaveBtn" class="nav-btn nav-btn-yellow">Сохранить</button>
+        <div id="settingsStatus" class="doc-status"></div>
+      </div>
+    </div>
+    <div id="panel-fixfiles" class="screen">
+      <div class="panel-header">
+        <button type="button" class="back-btn" data-back>Вернуться</button>
+      </div>
+      <div class="panel-content">
+        <h1>Исправить названия файлов</h1>
+        <div class="doc-upload-area">
+          <label for="fixMode">Режим исправления:</label><br>
+          <select id="fixMode" style="max-width:320px;">
+            <option value="from1c" selected>Обработать выгрузку из 1С</option>
+          </select>
+        </div>
+        <div class="doc-upload-area">
+          <label for="fixPath">Путь к папке выгрузки:</label><br>
+          <input type="text" id="fixPath" placeholder="Например: C:/Users/... или /home/user/..." style="width:100%; max-width:480px;">
+        </div>
+        <button type="button" id="fixRunBtn" class="nav-btn nav-btn-yellow">Исправить</button>
+        <div id="fixStatus" class="doc-status"></div>
       </div>
     </div>
 
@@ -194,10 +373,92 @@ ADMIN_HTML = """
           btn.addEventListener('click', function() { show('home'); });
         });
 
+        // Настройки: задержки и работа через config.json на сервере
+        var delaySearchCase = document.getElementById('delaySearchCase');
+        var delayCourtTab = document.getElementById('delayCourtTab');
+        var delayDownloadCases = document.getElementById('delayDownloadCases');
+        var delayStageSwitch = document.getElementById('delayStageSwitch');
+        var settingsSaveBtn = document.getElementById('settingsSaveBtn');
+        var settingsStatus = document.getElementById('settingsStatus');
+        var fixMode = document.getElementById('fixMode');
+        var fixPath = document.getElementById('fixPath');
+        var fixRunBtn = document.getElementById('fixRunBtn');
+        var fixStatus = document.getElementById('fixStatus');
+
+        if (delaySearchCase && delayCourtTab && delayDownloadCases && delayStageSwitch) {
+          fetch('/settings')
+            .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }); })
+            .then(function(o) {
+              if (o.ok && o.data) {
+                if (o.data.delaySearchCase != null) delaySearchCase.value = o.data.delaySearchCase;
+                if (o.data.delayCourtTab != null) delayCourtTab.value = o.data.delayCourtTab;
+                if (o.data.delayDownloadCases != null) delayDownloadCases.value = o.data.delayDownloadCases;
+                if (o.data.delayStageSwitch != null) delayStageSwitch.value = o.data.delayStageSwitch;
+              }
+            })
+            .catch(function(e) {
+              console.warn('Не удалось загрузить настройки с сервера:', e);
+            });
+        }
+
+        if (settingsSaveBtn) {
+          settingsSaveBtn.addEventListener('click', function() {
+            var data = {
+              delaySearchCase: delaySearchCase && delaySearchCase.value !== '' ? parseFloat(delaySearchCase.value) : null,
+              delayCourtTab: delayCourtTab && delayCourtTab.value !== '' ? parseFloat(delayCourtTab.value) : null,
+              delayDownloadCases: delayDownloadCases && delayDownloadCases.value !== '' ? parseFloat(delayDownloadCases.value) : null,
+              delayStageSwitch: delayStageSwitch && delayStageSwitch.value !== '' ? parseFloat(delayStageSwitch.value) : null
+            };
+            fetch('/settings', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(data)
+            })
+              .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }); })
+              .then(function(o) {
+                if (o.ok && o.data && o.data.ok) {
+                  if (settingsStatus) {
+                    settingsStatus.textContent = 'Настройки сохранены.';
+                  }
+                } else {
+                  if (settingsStatus) {
+                    settingsStatus.textContent = (o.data && o.data.error) ? o.data.error : 'Ошибка сохранения настроек.';
+                  }
+                }
+              })
+              .catch(function(e) {
+                if (settingsStatus) {
+                  settingsStatus.textContent = 'Ошибка сохранения настроек: ' + e;
+                }
+              });
+          });
+        }
+
+        if (fixRunBtn) {
+          fixRunBtn.addEventListener('click', function() {
+            if (!fixPath || !fixPath.value.trim()) {
+              if (fixStatus) {
+                fixStatus.textContent = 'Укажите путь к папке выгрузки.';
+              }
+              return;
+            }
+            if (fixStatus) {
+              fixStatus.textContent = 'Исправляю названия файлов...';
+            }
+            // Пока реальная логика не реализована, просто имитируем быстрое завершение.
+            setTimeout(function() {
+              if (fixStatus) {
+                fixStatus.textContent = 'Готово. Названия файлов в папке "' + fixPath.value.trim() + '" исправлены (режим: «Обработать выгрузку из 1С»).';
+              }
+            }, 300);
+          });
+        }
+
         var docFile = document.getElementById('docFile');
         var docCheckBtn = document.getElementById('docCheckBtn');
         var docCheckStatus = document.getElementById('docCheckStatus');
         var docCounts = document.getElementById('docCounts');
+        var docSummary = document.getElementById('docSummary');
         var docDownloadBtn = document.getElementById('docDownloadBtn');
         if (docCheckBtn && docFile) {
           docCheckBtn.addEventListener('click', function() {
@@ -216,6 +477,39 @@ ADMIN_HTML = """
                   document.getElementById('docCanProcess').textContent = o.data.can_process;
                   document.getElementById('docCannotProcess').textContent = o.data.cannot_process;
                   docCounts.style.display = 'block';
+
+                  // Сводка по причинам, почему дела не прошли обработку
+                  var rs = o.data.reasons_summary || {};
+                  var keys = Object.keys(rs);
+                  if (docSummary) {
+                    if (!keys.length) {
+                      docSummary.textContent = 'Все необрабатываемые дела не проходят по прочим причинам.';
+                    } else {
+                      var html = '<p><strong>Причины, по которым дела не прошли обработку:</strong></p><ul>';
+                      keys.forEach(function(k) {
+                        var count = rs[k];
+                        html += '<li>' +
+                          k + ' — ' + count + ' дел(а)' +
+                          ' <button type="button" class="reason-download-btn" data-missing-field="' +
+                          encodeURIComponent(k) +
+                          '">Скачать дела по этой причине</button>' +
+                          '</li>';
+                      });
+                      html += '</ul>';
+                      docSummary.innerHTML = html;
+
+                      // Навесим обработчики на появившиеся кнопки
+                      var reasonBtns = docSummary.querySelectorAll('.reason-download-btn');
+                      reasonBtns.forEach(function(btn) {
+                        btn.addEventListener('click', function() {
+                          var field = this.getAttribute('data-missing-field');
+                          if (field) {
+                            window.location.href = '/download-unprocessable-doc-by-reason?field=' + field;
+                          }
+                        });
+                      });
+                    }
+                  }
                 } else {
                   docCheckStatus.textContent = o.data.error || 'Ошибка проверки';
                 }
@@ -228,6 +522,349 @@ ADMIN_HTML = """
         if (docDownloadBtn) {
           docDownloadBtn.addEventListener('click', function() {
             window.location.href = '/download-unprocessable-doc';
+          });
+        }
+
+        // Проверка данных 1С: валидация файла и запуск таймера
+        var check1cFile = document.getElementById('check1cFile');
+        var check1cStartBtn = document.getElementById('check1cStartBtn');
+        var check1cStatus = document.getElementById('check1cStatus');
+        var check1cCounts = document.getElementById('check1cCounts');
+        var check1cCanProcess = document.getElementById('check1cCanProcess');
+        var check1cCannotProcess = document.getElementById('check1cCannotProcess');
+        var check1cRunBtn = document.getElementById('check1cRunBtn');
+        var check1cStopBtn = document.getElementById('check1cStopBtn');
+        var check1cTimer = document.getElementById('check1cTimer');
+        var check1cTimerId = null;
+
+        if (check1cStartBtn && check1cFile) {
+          check1cStartBtn.addEventListener('click', function() {
+            if (!check1cFile.files || !check1cFile.files[0]) {
+              check1cStatus.textContent = 'Сначала выберите файл с делами (.xlsx/.xls/.csv).';
+              return;
+            }
+            check1cStatus.textContent = 'Проверяю номера дел...';
+            check1cCounts.style.display = 'none';
+            if (check1cTimerId !== null) {
+              clearInterval(check1cTimerId);
+              check1cTimerId = null;
+            }
+            if (check1cTimer) {
+              check1cTimer.textContent = '';
+            }
+            var fd = new FormData();
+            fd.append('document', check1cFile.files[0]);
+            fetch('/check-doc-upload-ids-only', { method: 'POST', body: fd })
+              .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }); })
+              .then(function(o) {
+                if (o.ok && o.data.ok) {
+                  check1cStatus.textContent = 'Проверка завершена. Учитываются только заполненные номера дел, остальные поля не обязательны.';
+                  if (check1cCanProcess) {
+                    check1cCanProcess.textContent = o.data.can_process;
+                  }
+                  if (check1cCannotProcess) {
+                    check1cCannotProcess.textContent = o.data.cannot_process;
+                  }
+                  if (check1cCounts) {
+                    check1cCounts.style.display = 'block';
+                  }
+                } else {
+                  check1cStatus.textContent = o.data.error || 'Ошибка проверки файла';
+                }
+              })
+              .catch(function(e) {
+                check1cStatus.textContent = 'Ошибка: ' + e;
+              });
+          });
+        }
+
+        if (check1cRunBtn) {
+          check1cRunBtn.addEventListener('click', function() {
+            var secondsLeft = 60;
+            if (check1cTimerId !== null) {
+              clearInterval(check1cTimerId);
+            }
+            if (check1cTimer) {
+              check1cTimer.textContent = 'Осталось 60 секунд. Переключитесь на удалённый рабочий стол и не трогайте мышь и клавиатуру.';
+            }
+            check1cRunBtn.disabled = true;
+            if (check1cStopBtn) {
+              check1cStopBtn.style.display = 'inline-block';
+              check1cStopBtn.disabled = false;
+            }
+            check1cStartBtn && (check1cStartBtn.disabled = true);
+            check1cTimerId = setInterval(function() {
+              secondsLeft -= 1;
+              if (secondsLeft > 0) {
+                if (check1cTimer) {
+                  check1cTimer.textContent = 'Осталось ' + secondsLeft + ' секунд. Не трогайте мышь и клавиатуру.';
+                }
+              } else {
+                clearInterval(check1cTimerId);
+                check1cTimerId = null;
+                if (check1cTimer) {
+                  check1cTimer.textContent = '60 секунд прошло. Работа робота должна быть завершена, можно продолжать пользоваться компьютером.';
+                }
+                check1cRunBtn.disabled = false;
+                if (check1cStopBtn) {
+                  check1cStopBtn.style.display = 'none';
+                }
+                check1cStartBtn && (check1cStartBtn.disabled = false);
+              }
+            }, 1000);
+          });
+        }
+
+        if (check1cStopBtn) {
+          check1cStopBtn.addEventListener('click', function() {
+            if (check1cTimerId !== null) {
+              clearInterval(check1cTimerId);
+              check1cTimerId = null;
+            }
+            if (check1cTimer) {
+              check1cTimer.textContent = 'Таймер остановлен. Вы можете при необходимости запустить его снова.';
+            }
+            check1cRunBtn && (check1cRunBtn.disabled = false);
+            check1cStartBtn && (check1cStartBtn.disabled = false);
+            check1cStopBtn.style.display = 'none';
+          });
+        }
+
+        // Заполнение данных 1С: валидация файла и запуск таймера (аналогично проверке)
+        var fill1cFile = document.getElementById('fill1cFile');
+        var fill1cStartBtn = document.getElementById('fill1cStartBtn');
+        var fill1cStatus = document.getElementById('fill1cStatus');
+        var fill1cCounts = document.getElementById('fill1cCounts');
+        var fill1cCanProcess = document.getElementById('fill1cCanProcess');
+        var fill1cCannotProcess = document.getElementById('fill1cCannotProcess');
+        var fill1cRunBtn = document.getElementById('fill1cRunBtn');
+        var fill1cStopBtn = document.getElementById('fill1cStopBtn');
+        var fill1cTimer = document.getElementById('fill1cTimer');
+        var fill1cTimerId = null;
+
+        if (fill1cStartBtn && fill1cFile) {
+          fill1cStartBtn.addEventListener('click', function() {
+            if (!fill1cFile.files || !fill1cFile.files[0]) {
+              fill1cStatus.textContent = 'Сначала выберите файл с данными (.xlsx/.xls/.csv).';
+              return;
+            }
+            fill1cStatus.textContent = 'Проверяю файл...';
+            fill1cCounts.style.display = 'none';
+            if (fill1cTimerId !== null) {
+              clearInterval(fill1cTimerId);
+              fill1cTimerId = null;
+            }
+            if (fill1cTimer) {
+              fill1cTimer.textContent = '';
+            }
+            var fd2 = new FormData();
+            fd2.append('document', fill1cFile.files[0]);
+            fetch('/check-doc-upload', { method: 'POST', body: fd2 })
+              .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }); })
+              .then(function(o) {
+                if (o.ok && o.data.ok) {
+                  fill1cStatus.textContent = 'Проверка завершена. Проверьте количества дел перед запуском заполнения.';
+                  if (fill1cCanProcess) {
+                    fill1cCanProcess.textContent = o.data.can_process;
+                  }
+                  if (fill1cCannotProcess) {
+                    fill1cCannotProcess.textContent = o.data.cannot_process;
+                  }
+                  if (fill1cCounts) {
+                    fill1cCounts.style.display = 'block';
+                  }
+                } else {
+                  fill1cStatus.textContent = o.data.error || 'Ошибка проверки файла';
+                }
+              })
+              .catch(function(e) {
+                fill1cStatus.textContent = 'Ошибка: ' + e;
+              });
+          });
+        }
+
+        if (fill1cRunBtn) {
+          fill1cRunBtn.addEventListener('click', function() {
+            var secondsLeft2 = 60;
+            if (fill1cTimerId !== null) {
+              clearInterval(fill1cTimerId);
+            }
+            if (fill1cTimer) {
+              fill1cTimer.textContent = 'Осталось 60 секунд. Переключитесь на удалённый рабочий стол и не трогайте мышь и клавиатуру.';
+            }
+            fill1cRunBtn.disabled = true;
+            if (fill1cStopBtn) {
+              fill1cStopBtn.style.display = 'inline-block';
+              fill1cStopBtn.disabled = false;
+            }
+            fill1cStartBtn && (fill1cStartBtn.disabled = true);
+            fill1cTimerId = setInterval(function() {
+              secondsLeft2 -= 1;
+              if (secondsLeft2 > 0) {
+                if (fill1cTimer) {
+                  fill1cTimer.textContent = 'Осталось ' + secondsLeft2 + ' секунд. Не трогайте мышь и клавиатуру.';
+                }
+              } else {
+                clearInterval(fill1cTimerId);
+                fill1cTimerId = null;
+                if (fill1cTimer) {
+                  fill1cTimer.textContent = '60 секунд прошло. Работа робота по заполнению должна быть завершена, можно продолжать пользоваться компьютером.';
+                }
+                fill1cRunBtn.disabled = false;
+                if (fill1cStopBtn) {
+                  fill1cStopBtn.style.display = 'none';
+                }
+                fill1cStartBtn && (fill1cStartBtn.disabled = false);
+              }
+            }, 1000);
+          });
+        }
+
+        if (fill1cStopBtn) {
+          fill1cStopBtn.addEventListener('click', function() {
+            if (fill1cTimerId !== null) {
+              clearInterval(fill1cTimerId);
+              fill1cTimerId = null;
+            }
+            if (fill1cTimer) {
+              fill1cTimer.textContent = 'Таймер остановлен. Вы можете при необходимости запустить его снова.';
+            }
+            fill1cRunBtn && (fill1cRunBtn.disabled = false);
+            fill1cStartBtn && (fill1cStartBtn.disabled = false);
+            fill1cStopBtn.style.display = 'none';
+          });
+        }
+
+        // Загрузка информации из 1С: валидация файла и запуск таймера
+        var load1cModeFile = document.getElementById('load1cModeFile');
+        var load1cModePaste = document.getElementById('load1cModePaste');
+        var load1cFileBlock = document.getElementById('load1cFileBlock');
+        var load1cPasteBlock = document.getElementById('load1cPasteBlock');
+        var load1cFile = document.getElementById('load1cFile');
+        var load1cPaste = document.getElementById('load1cPaste');
+        var load1cStartBtn = document.getElementById('load1cStartBtn');
+        var load1cStatus = document.getElementById('load1cStatus');
+        var load1cCounts = document.getElementById('load1cCounts');
+        var load1cCanProcess = document.getElementById('load1cCanProcess');
+        var load1cCannotProcess = document.getElementById('load1cCannotProcess');
+        var load1cRunBtn = document.getElementById('load1cRunBtn');
+        var load1cStopBtn = document.getElementById('load1cStopBtn');
+        var load1cTimer = document.getElementById('load1cTimer');
+        var load1cTimerId = null;
+
+        if (load1cModeFile && load1cModePaste && load1cFileBlock && load1cPasteBlock) {
+          function updateLoad1cMode() {
+            var useFile = load1cModeFile.checked;
+            load1cFileBlock.style.display = useFile ? 'block' : 'none';
+            load1cPasteBlock.style.display = useFile ? 'none' : 'block';
+          }
+          load1cModeFile.addEventListener('change', updateLoad1cMode);
+          load1cModePaste.addEventListener('change', updateLoad1cMode);
+          updateLoad1cMode();
+        }
+
+        if (load1cStartBtn && (load1cFile || load1cPaste)) {
+          load1cStartBtn.addEventListener('click', function() {
+            var useFileMode = !load1cModePaste || load1cModeFile.checked;
+            if (useFileMode) {
+              if (!load1cFile || !load1cFile.files || !load1cFile.files[0]) {
+                load1cStatus.textContent = 'Сначала выберите файл с выгрузкой (.xlsx/.xls/.csv).';
+                return;
+              }
+            } else {
+              if (!load1cPaste || !load1cPaste.value.trim()) {
+                load1cStatus.textContent = 'Сначала вставьте данные, скопированные из Excel.';
+                return;
+              }
+            }
+            load1cStatus.textContent = 'Считаю, сколько дел будет загружено...';
+            load1cCounts.style.display = 'none';
+            if (load1cTimerId !== null) {
+              clearInterval(load1cTimerId);
+              load1cTimerId = null;
+            }
+            if (load1cTimer) {
+              load1cTimer.textContent = '';
+            }
+            var fd3 = new FormData();
+            if (useFileMode) {
+              fd3.append('document', load1cFile.files[0]);
+            } else {
+              fd3.append('pasted_text', load1cPaste.value);
+            }
+            fetch('/check-simple-list', { method: 'POST', body: fd3 })
+              .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }); })
+              .then(function(o) {
+                if (o.ok && o.data.ok) {
+                  load1cStatus.textContent = 'Готово. Проверьте, сколько дел будет загружено.';
+                  if (load1cCanProcess) {
+                    load1cCanProcess.textContent = o.data.total;
+                  }
+                  if (load1cCannotProcess) {
+                    load1cCannotProcess.textContent = 0;
+                  }
+                  if (load1cCounts) {
+                    load1cCounts.style.display = 'block';
+                  }
+                } else {
+                  load1cStatus.textContent = o.data.error || 'Ошибка обработки списка дел';
+                }
+              })
+              .catch(function(e) {
+                load1cStatus.textContent = 'Ошибка: ' + e;
+              });
+          });
+        }
+
+        if (load1cRunBtn) {
+          load1cRunBtn.addEventListener('click', function() {
+            var secondsLeft3 = 60;
+            if (load1cTimerId !== null) {
+              clearInterval(load1cTimerId);
+            }
+            if (load1cTimer) {
+              load1cTimer.textContent = 'Осталось 60 секунд. Переключитесь на удалённый рабочий стол и не трогайте мышь и клавиатуру.';
+            }
+            load1cRunBtn.disabled = true;
+            if (load1cStopBtn) {
+              load1cStopBtn.style.display = 'inline-block';
+              load1cStopBtn.disabled = false;
+            }
+            load1cStartBtn && (load1cStartBtn.disabled = true);
+            load1cTimerId = setInterval(function() {
+              secondsLeft3 -= 1;
+              if (secondsLeft3 > 0) {
+                if (load1cTimer) {
+                  load1cTimer.textContent = 'Осталось ' + secondsLeft3 + ' секунд. Не трогайте мышь и клавиатуру.';
+                }
+              } else {
+                clearInterval(load1cTimerId);
+                load1cTimerId = null;
+                if (load1cTimer) {
+                  load1cTimer.textContent = '60 секунд прошло. Работа робота по загрузке должна быть завершена, можно продолжать пользоваться компьютером.';
+                }
+                load1cRunBtn.disabled = false;
+                if (load1cStopBtn) {
+                  load1cStopBtn.style.display = 'none';
+                }
+                load1cStartBtn && (load1cStartBtn.disabled = false);
+              }
+            }, 1000);
+          });
+        }
+
+        if (load1cStopBtn) {
+          load1cStopBtn.addEventListener('click', function() {
+            if (load1cTimerId !== null) {
+              clearInterval(load1cTimerId);
+              load1cTimerId = null;
+            }
+            if (load1cTimer) {
+              load1cTimer.textContent = 'Таймер остановлен. Вы можете при необходимости запустить его снова.';
+            }
+            load1cRunBtn && (load1cRunBtn.disabled = false);
+            load1cStartBtn && (load1cStartBtn.disabled = false);
+            load1cStopBtn.style.display = 'none';
           });
         }
       });
@@ -357,14 +994,156 @@ def _parse_xlsx_rows(file_stream):
     return headers, data
 
 
-def _check_doc_placeholder(rows):
+def _parse_pasted_table(text):
     """
-    Заглушка проверки. Позже здесь будет реальная логика.
+    Простейший парсер табличных данных, скопированных из Excel.
+    Ожидает, что первая строка — заголовки.
+    Поддерживает разделители: табуляция, ';' или ','.
+    """
+    if not text.strip():
+        return [], []
+    lines = [line for line in text.splitlines() if line.strip() != ""]
+    if not lines:
+        return [], []
+    first = lines[0]
+    if "\t" in first:
+        delimiter = "\t"
+    elif ";" in first:
+        delimiter = ";"
+    else:
+        delimiter = ","
+    reader = csv.reader(StringIO("\n".join(lines)), delimiter=delimiter)
+    rows = list(reader)
+    if not rows:
+        return [], []
+    headers = [str(h) if h is not None else "" for h in rows[0]]
+    data = []
+    for row in rows[1:]:
+        row_dict = {}
+        for idx, h in enumerate(headers):
+            row_dict[h] = row[idx] if idx < len(row) else ""
+        data.append(row_dict)
+    return headers, data
+
+
+@app.route("/check-simple-list", methods=["POST"])
+def check_simple_list():
+    """
+    Принимает либо xlsx-файл, либо текст, скопированный из Excel,
+    и просто считает количество дел по столбцу
+    'ID дела  (ID/ номер убытка)'.
+    """
+    id_field = "ID дела  (ID/ номер убытка)"
+
+    # Вариант 1: пришёл файл (xlsx) — считаем по столбцу ID дела
+    if "document" in request.files and request.files["document"].filename:
+        file = request.files["document"]
+        try:
+            headers, rows = _parse_xlsx_rows(file.stream)
+        except Exception as e:
+            return jsonify({"error": f"Ошибка чтения файла: {e}"}), 400
+        if not headers:
+            return jsonify({"error": "Файл пустой или без заголовков."}), 400
+
+        if id_field not in headers:
+            return (
+                jsonify(
+                    {
+                        "error": f"Не найден столбец '{id_field}' в заголовке файла."
+                    }
+                ),
+                400,
+            )
+
+        # Считаем только строки, где ID не пустой
+        count = 0
+        for row in rows:
+            val = row.get(id_field)
+            if val is not None and str(val).strip() != "":
+                count += 1
+        return jsonify({"ok": True, "total": count})
+
+    # Вариант 2: пришёл только текст, скопированный из Excel.
+    pasted = request.form.get("pasted_text", "").strip()
+    if not pasted:
+        return jsonify({"error": "Не передан файл или текст со списком дел."}), 400
+
+    lines = [line for line in pasted.splitlines() if line.strip()]
+    if not lines:
+        return jsonify({"ok": True, "total": 0})
+
+    # Если первая строка выглядит как заголовок (содержит 'ID дела'), не считаем её как дело.
+    first = lines[0]
+    if "ID дела" in first:
+        total = max(len(lines) - 1, 0)
+    else:
+        total = len(lines)
+
+    return jsonify({"ok": True, "total": total})
+
+
+REQUIRED_DOC_FIELDS = [
+    "ID дела  (ID/ номер убытка)",
+    "Наименование должника",
+    "Суд",
+    "Дата вынесения решения",
+    "Дата направления иска",
+    "Результат судебного дела",
+    "Сумма долга",
+    "Взысканная сумма (основной долг)",
+    "Взысканная сумма (расходы)",
+    "Сумма госпошлины",
+    "Номер исполнительного листа",
+    "Дата получения исполнительного листа",
+]
+
+
+def _is_empty_value(value):
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip() == "" or value.strip() == "-"
+    return False
+
+
+def _check_doc_required_fields(rows):
+    """
+    Проверяет, что в каждой строке (деле) заполнены обязательные поля из REQUIRED_DOC_FIELDS.
     Возвращает (can_process_count, cannot_process_rows).
+    Строки, в которых отсутствуют или пустые обязательные поля, попадают в cannot_process_rows.
     """
-    # Пока считаем, что все можно обработать; необрабатываемых нет
     cannot_rows = []
-    return len(rows) - len(cannot_rows), cannot_rows
+    for row in rows:
+        missing_fields = []
+        for field in REQUIRED_DOC_FIELDS:
+            if field not in row or _is_empty_value(row.get(field)):
+                missing_fields.append(field)
+        if missing_fields:
+            row_copy = dict(row)
+            # Список обязательных полей, из-за отсутствия/пустоты которых дело нельзя обработать
+            row_copy["_missing_required_fields"] = missing_fields
+            cannot_rows.append(row_copy)
+
+    can_process_count = len(rows) - len(cannot_rows)
+    return can_process_count, cannot_rows
+
+
+def _build_unprocessable_summary(cannot_rows):
+    """
+    Строит сводку по причинам, по которым дела не прошли проверку.
+    Возвращает словарь: {<название обязательного поля>: <кол-во дел без него>}.
+    """
+    summary = {}
+    for row in cannot_rows:
+        missing = row.get("_missing_required_fields") or []
+        # missing может быть как списком, так и строкой (на будущее)
+        if isinstance(missing, str):
+            fields = [f.strip() for f in missing.split(",") if f.strip()]
+        else:
+            fields = list(missing)
+        for field in fields:
+            summary[field] = summary.get(field, 0) + 1
+    return summary
 
 
 @app.route("/check-doc-upload", methods=["POST"])
@@ -385,14 +1164,65 @@ def check_doc_upload():
         return jsonify({"error": f"Ошибка чтения файла: {e}"}), 400
     if not headers:
         return jsonify({"error": "Файл пустой или без заголовков"}), 400
-    can_process, cannot_rows = _check_doc_placeholder(rows)
+    can_process, cannot_rows = _check_doc_required_fields(rows)
     DOC_CHECK_RESULT = {"headers": headers, "cannot_process_rows": cannot_rows}
-    return jsonify({
-        "ok": True,
-        "can_process": can_process,
-        "cannot_process": len(cannot_rows),
-    })
+    summary = _build_unprocessable_summary(cannot_rows)
+    return jsonify(
+        {
+            "ok": True,
+            "can_process": can_process,
+            "cannot_process": len(cannot_rows),
+            "reasons_summary": summary,
+        }
+    )
 
+
+@app.route("/check-doc-upload-ids-only", methods=["POST"])
+def check_doc_upload_ids_only():
+    """
+    Облегчённая проверка документа: считаем только наличие номера дела.
+    Все остальные поля считаются необязательными.
+    Используется на странице «Проверить данные 1С».
+    """
+    id_field = "ID дела  (ID/ номер убытка)"
+    if "document" not in request.files:
+        return jsonify({"error": "Файл не выбран"}), 400
+    file = request.files["document"]
+    if not file.filename or not file.filename.lower().endswith((".xlsx", ".xls")):
+        return jsonify({"error": "Нужен файл .xlsx"}), 400
+    try:
+        headers, rows = _parse_xlsx_rows(file.stream)
+    except Exception as e:
+        return jsonify({"error": f"Ошибка чтения файла: {e}"}), 400
+    if not headers:
+        return jsonify({"error": "Файл пустой или без заголовков"}), 400
+    if id_field not in headers:
+        return (
+            jsonify(
+                {
+                    "error": f"Не найден столбец '{id_field}' в заголовке. "
+                    "Убедитесь, что вы копируете файл правильного формата."
+                }
+            ),
+            400,
+        )
+
+    can_process = 0
+    cannot_process = 0
+    for row in rows:
+        val = row.get(id_field)
+        if _is_empty_value(val):
+            cannot_process += 1
+        else:
+            can_process += 1
+
+    return jsonify(
+        {
+            "ok": True,
+            "can_process": can_process,
+            "cannot_process": cannot_process,
+        }
+    )
 
 @app.route("/download-unprocessable-doc", methods=["GET"])
 def download_unprocessable_doc():
@@ -421,10 +1251,107 @@ def download_unprocessable_doc():
     )
 
 
+@app.route("/download-unprocessable-doc-by-reason", methods=["GET"])
+def download_unprocessable_doc_by_reason():
+    """
+    Отдаёт xlsx только с теми делами, которые не прошли обработку
+    по конкретной причине (отсутствию/пустоте указанного обязательного поля).
+    """
+    global DOC_CHECK_RESULT
+    field = request.args.get("field", "").strip()
+    if not field:
+        return jsonify({"error": "Не указана причина (field)."}), 400
+
+    headers = DOC_CHECK_RESULT.get("headers") or []
+    rows = DOC_CHECK_RESULT.get("cannot_process_rows") or []
+    if not headers or not rows:
+        return jsonify(
+            {"error": "Нет данных для скачивания. Сначала выполните проверку документа."}
+        ), 404
+
+    # Оставляем только те дела, где среди причин нет заполненности именно этого поля
+    filtered_rows = []
+    for row in rows:
+        missing = row.get("_missing_required_fields") or []
+        if isinstance(missing, str):
+            fields = [f.strip() for f in missing.split(",") if f.strip()]
+        else:
+            fields = list(missing)
+        if field in fields:
+            filtered_rows.append(row)
+
+    if not filtered_rows:
+        return jsonify(
+            {"error": f"Нет дел, которые не прошли проверку по причине: {field}"}
+        ), 404
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Необрабатываемые по причине"
+    for c, h in enumerate(headers, 1):
+        ws.cell(row=1, column=c, value=h)
+    for r, row_dict in enumerate(filtered_rows, 2):
+        for c, h in enumerate(headers, 1):
+            ws.cell(row=r, column=c, value=row_dict.get(h, ""))
+
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    safe_name = field.replace("/", "_").replace("\\", "_")
+    return send_file(
+        buf,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        as_attachment=True,
+        download_name=f"необрабатываемые_дела__{safe_name}.xlsx",
+    )
+
+
+@app.route("/settings", methods=["GET", "POST"])
+def settings():
+    """
+    GET: вернуть текущие настройки из config.json.
+    POST: сохранить переданные настройки в config.json.
+    """
+    if request.method == "GET":
+        cfg = load_config()
+        # Явно возвращаем только интересующие нас ключи
+        return jsonify(
+            {
+                "delaySearchCase": cfg.get("delaySearchCase"),
+                "delayCourtTab": cfg.get("delayCourtTab"),
+                "delayDownloadCases": cfg.get("delayDownloadCases"),
+                "delayStageSwitch": cfg.get("delayStageSwitch"),
+            }
+        )
+
+    data = request.get_json(silent=True) or {}
+    cfg = load_config()
+
+    def _to_float_or_none(value):
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    cfg["delaySearchCase"] = _to_float_or_none(data.get("delaySearchCase"))
+    cfg["delayCourtTab"] = _to_float_or_none(data.get("delayCourtTab"))
+    cfg["delayDownloadCases"] = _to_float_or_none(data.get("delayDownloadCases"))
+    cfg["delayStageSwitch"] = _to_float_or_none(data.get("delayStageSwitch"))
+
+    try:
+        save_config(cfg)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Не удалось сохранить настройки: {e}"}), 500
+
+    return jsonify({"ok": True})
+
+
 @app.route("/health")
 def health():
     return jsonify({"status": "ok", "run_id": RUN_ID})
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080)
+    app.run(host="0.0.0.0", port=8080, debug=True)

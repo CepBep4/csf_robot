@@ -62,3 +62,6 @@ def paste() -> None:
     """
     hotkey("ctrl", "v")
     
+def keyPress():
+    pass
+    

@@ -20,6 +20,7 @@ from robot_run import run as run_robot
 from robot_state import request_stop_run
 from robot_payload import normalize_robot_payload
 from robot import validate_before_setting
+from worker.unziper import unzip_all_in_dir
 
 app = Flask(__name__)
 
@@ -382,7 +383,7 @@ ADMIN_HTML = """
         </div>
         <div class="doc-upload-area">
           <label for="fixPath">Путь к папке выгрузки:</label><br>
-          <input type="text" id="fixPath" placeholder="Например: C:/Users/... или /home/user/..." style="width:100%; max-width:480px;">
+          <input type="text" id="fixPath" placeholder="Пусто = папка uploader. Или путь: C:/Users/... или /home/user/..." style="width:100%; max-width:480px;">
         </div>
         <button type="button" id="fixRunBtn" class="nav-btn nav-btn-yellow">Исправить</button>
         <div id="fixStatus" class="doc-status"></div>
@@ -478,21 +479,35 @@ ADMIN_HTML = """
 
         if (fixRunBtn) {
           fixRunBtn.addEventListener('click', function() {
-            if (!fixPath || !fixPath.value.trim()) {
-              if (fixStatus) {
-                fixStatus.textContent = 'Укажите путь к папке выгрузки.';
-              }
-              return;
-            }
+            var pathVal = fixPath && fixPath.value.trim ? fixPath.value.trim() : '';
             if (fixStatus) {
               fixStatus.textContent = 'Исправляю названия файлов...';
             }
-            // Пока реальная логика не реализована, просто имитируем быстрое завершение.
-            setTimeout(function() {
-              if (fixStatus) {
-                fixStatus.textContent = 'Готово. Названия файлов в папке "' + fixPath.value.trim() + '" исправлены (режим: «Обработать выгрузку из 1С»).';
-              }
-            }, 300);
+            fetch('/fix-filenames', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ path: pathVal })
+            })
+              .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }); })
+              .then(function(o) {
+                if (!fixStatus) return;
+                if (o.ok && o.data.ok) {
+                  var d = o.data;
+                  var used = d.path_used || pathVal || 'папка uploader';
+                  var n = (d.processed && d.processed.length) || 0;
+                  var errs = (d.errors && d.errors.length) || 0;
+                  var msg = 'Готово. Обработано архивов: ' + n + ', ошибок/пропусков: ' + errs + '. Папка: ' + used;
+                  if (errs && d.errors && d.errors.length) {
+                    msg += '. Ошибки: ' + d.errors.map(function(e) { return (e.file || '') + ' — ' + (e.message || ''); }).join('; ');
+                  }
+                  fixStatus.textContent = msg;
+                } else {
+                  fixStatus.textContent = 'Ошибка: ' + (o.data && o.data.error ? o.data.error : 'неизвестная');
+                }
+              })
+              .catch(function(e) {
+                if (fixStatus) fixStatus.textContent = 'Ошибка запроса: ' + e;
+              });
           });
         }
 
@@ -1624,6 +1639,39 @@ def robot_stop():
     """Запрос остановки текущего запуска робота."""
     request_stop_run()
     return jsonify({"ok": True, "stopping": True})
+
+
+# Папка по умолчанию для «Исправить названия файлов», если путь не указан
+UPLOADER_DIR = os.path.join(BASE_DIR, "uploader")
+
+
+@app.route("/fix-filenames", methods=["POST"])
+def fix_filenames():
+    """
+    Собирает все файлы из указанной папки (или из uploader, если путь пустой),
+    прогоняет каждый через распаковку ZIP (unzip_to_dir).
+    """
+    data = request.get_json(silent=True) or {}
+    path_raw = (data.get("path") or "").strip()
+    target_dir = os.path.abspath(path_raw) if path_raw else UPLOADER_DIR
+
+    if not os.path.isdir(target_dir):
+        return jsonify({
+            "ok": False,
+            "error": f"Папка не найдена или не является директорией: {target_dir}",
+        }), 400
+
+    try:
+        processed, errors = unzip_all_in_dir(target_dir)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+    return jsonify({
+        "ok": True,
+        "path_used": target_dir,
+        "processed": [str(p) for p in processed],
+        "errors": [{"file": str(f), "message": msg} for f, msg in errors],
+    })
 
 
 @app.route("/health")

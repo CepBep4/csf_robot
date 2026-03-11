@@ -1,6 +1,108 @@
-from pyautogui import click, press, pixel, hotkey
+from pyautogui import click, press, pixel, hotkey, screenshot
 from time import sleep
 from worker.utils import addToBuffer, getFromBuffer
+
+def check_color(target_rgb, tolerance=5, region=None):
+    """
+    Ищет на экране (или в области region) хотя бы один пиксель,
+    цвет которого совпадает с target_rgb с допуском tolerance по каждому каналу.
+    target_rgb: (r, g, b), например (85, 105, 194)
+    region: None = весь экран, иначе (left, top, width, height)
+    Возвращает True если найден, иначе False.
+    """
+    img = screenshot(region=region)
+    w, h = img.size
+    tr, tg, tb = target_rgb
+    for x in range(w):
+        for y in range(h):
+            p = img.getpixel((x, y))
+            r, g, b = p[:3]
+            if abs(r - tr) <= tolerance and abs(g - tg) <= tolerance and abs(b - tb) <= tolerance:
+                return True
+    return False
+
+def pixel_matches(x, y, target_rgb, tolerance_pct=0.05):
+    """Проверяет, что цвет пикселя (x, y) совпадает с target_rgb с допуском tolerance_pct (0.05 = 5%)."""
+    r, g, b = pixel(x, y)
+    tr, tg, tb = target_rgb
+    t = int(255 * tolerance_pct)
+    return abs(r - tr) <= t and abs(g - tg) <= t and abs(b - tb) <= t
+
+def _pixel_matches(img, px, py, target_rgb, tol, green_only=False):
+    """Проверка пикселя: цвет в допуске tol (абсолютное значение по каналу). green_only=True — G > R."""
+    if px < 0 or py < 0 or px >= img.size[0] or py >= img.size[1]:
+        return False
+    p = img.getpixel((px, py))
+    r, g, b = p[0], p[1], p[2]
+    tr, tg, tb = target_rgb
+    if not (abs(r - tr) <= tol and abs(g - tg) <= tol and abs(b - tb) <= tol):
+        return False
+    if green_only:
+        if g <= r:
+            return False
+    return True
+
+def find_pixel_in_region(region, target_rgb, tolerance_pct=0.05):
+    """
+    Ищет в области region первый пиксель цвета target_rgb (с допуском 5%).
+    region: (left, top, width, height)
+    Возвращает (screen_x, screen_y) или None.
+    """
+    img = screenshot(region=region)
+    w, h = img.size
+    left, top = region[0], region[1]
+    tr, tg, tb = target_rgb
+    t = int(255 * tolerance_pct)
+    for py in range(h):
+        for px in range(w):
+            p = img.getpixel((px, py))
+            r, g, b = p[:3]
+            if abs(r - tr) <= t and abs(g - tg) <= t and abs(b - tb) <= t:
+                return (left + px, top + py)
+    return None
+
+def find_button_center_in_region(region, target_rgb, tolerance_pct=0.15, tolerance_abs=None, min_pixels=30, green_only=False):
+    """
+    Ищет в области первое пятно цвета target_rgb, возвращает центр пятна.
+    tolerance_abs: если задан — допуск по каналу в единицах (например 15 = ±15 от значения); иначе tolerance_pct.
+    """
+    img = screenshot(region=region)
+    w, h = img.size
+    left, top = region[0], region[1]
+    t = int(tolerance_abs) if tolerance_abs is not None else int(255 * tolerance_pct)
+
+    def matches(px, py):
+        return _pixel_matches(img, px, py, target_rgb, t, green_only=green_only)
+
+    for py in range(h):
+        for px in range(w):
+            if not matches(px, py):
+                continue
+            # BFS — собрать связное пятно
+            stack = [(px, py)]
+            seen = {(px, py)}
+            while stack:
+                cx, cy = stack.pop()
+                for dx, dy in ((0, 1), (1, 0), (0, -1), (-1, 0)):
+                    nx, ny = cx + dx, cy + dy
+                    if (nx, ny) not in seen and 0 <= nx < w and 0 <= ny < h and matches(nx, ny):
+                        seen.add((nx, ny))
+                        stack.append((nx, ny))
+            if len(seen) < min_pixels:
+                continue
+            n = len(seen)
+            cx = sum(p[0] for p in seen) // n
+            cy = sum(p[1] for p in seen) // n
+            return (left + cx, top + cy)
+    return None
+
+# Область панели кнопок: левый верх (1710, 1248), правый низ (2545, 1363)
+BUTTON_PANEL_REGION = (1710, 1248, 835, 115)
+# Зелёная «Передать в суд» (другой оттенок)
+GREEN_TRANSFER_RGB = (204, 255, 216)
+# Зелёная «В пользу общества», красная «Не в пользу общества»
+GREEN_BUTTON_RGB = (146, 236, 146)
+RED_BUTTON_RGB = (255, 160, 122)
 
 def court_tab(
     name_defedant: str,  # Имя ответчика
@@ -14,15 +116,33 @@ def court_tab(
     summ_real_g: float,  # Одобренная сумма (госпошлина)
     cooldown=0,
 ):   
-    summ_s_check = False
-    summ_g_check = False
     "Проваливаемся во вкладку суд"
-    click(2518,630)
+    for _ in range(21):
+        press('tab')
+        sleep(0.5 + cooldown)
+        
+    "Выделяем всё, чтобы скопировать"
+    hotkey('ctrl', 'a', interval=0.5)
+    sleep(2+cooldown)
+
+    "Копируем, чтобы проверить по буфферу"
+    addToBuffer("none")
+    sleep(1+cooldown)
+    hotkey('ctrl', 'c', interval=0.5)
+    sleep(1+cooldown)
+
+    "Проверяем на заполнение поле"
+    if getFromBuffer() == 'none':
+        press('esc')
+        sleep(10+cooldown)
+        return ("Суд ", False)        
+        
+    hotkey('ctrl', 'shift', 'f4', interval=0.5)
     sleep(3+cooldown)
 
     "- ПОЛЕ ОТВЕТЧИК -"
     "Нажимаем на строку ответчик"
-    click(520,367)
+    press('tab')
     sleep(2+cooldown)
 
     "Выделяем всё, чтобы скопировать"
@@ -38,13 +158,10 @@ def court_tab(
     "Проверяем на заполнение поле"
     if getFromBuffer() == 'none':
         "Нажимаем на кнопку чтобы переключить в режим строки"
-        click(2502,369)
-        sleep(2+cooldown)
-
-        "В открывшемся меню переключаемся на строку"
-        press("up")
-        sleep(2+cooldown)
-        press("enter")
+        for _ in range(2):
+            press('up')
+            sleep(0.5+cooldown)
+        press('enter')
         sleep(2+cooldown)
 
         "Вводим имя ответчика"
@@ -56,7 +173,9 @@ def court_tab(
     "- ПОЛЕ СУД 1 - "
 
     "Нажимаем на поле СУД"
-    click(660,416)
+    for _ in range(2):
+        press('tab')
+        sleep(0.5+cooldown)
 
     "Выделяем всё, чтобы скопировать"
     hotkey('ctrl', 'a', interval=0.5)
@@ -69,9 +188,6 @@ def court_tab(
     sleep(1+cooldown)
 
     if getFromBuffer() == 'none':
-        "Нажимаем на поле СУД"
-        click(660,416)
-        
         "Вводим суд"
         addToBuffer(court)
         sleep(1+cooldown)
@@ -79,15 +195,9 @@ def court_tab(
         sleep(2+cooldown)
 
         "Проверяем что суд нашёлся в системе"
-        if pixel(498,431) == (83, 106, 194):
-            
-            "Выбираем найденный суд"
-            click(498,431)
-            sleep(2+cooldown)
-        
-        else:
+        if not check_color((83, 106, 194)):
             "Возвращаем ошибку, прерываем заполнение"
-            for _ in range(7):
+            for _ in range(3):
                 press('esc')
                 sleep(2+cooldown)
                 
@@ -101,10 +211,13 @@ def court_tab(
                 sleep(2+cooldown)
             return ("Суд не найден", False)
             
-    "- ПОЛЕ СУД 2 - "
+    # "- ПОЛЕ СУД 2 - "
 
     "Нажимаем на поле СУД"
-    click(589, 466)
+    press('enter')
+    sleep(0.5+cooldown) 
+    press('tab')
+    sleep(0.5+cooldown)
 
     "Выделяем всё, чтобы скопировать"
     hotkey('ctrl', 'a', interval=0.5)
@@ -115,11 +228,8 @@ def court_tab(
     sleep(1+cooldown)
     hotkey('ctrl', 'c', interval=0.5)
     sleep(1+cooldown)
-
+    
     if getFromBuffer() == 'none':
-        "Нажимаем на поле СУД"
-        click(589, 466)
-        
         "Вводим суд"
         addToBuffer(court)
         sleep(1+cooldown)
@@ -127,15 +237,9 @@ def court_tab(
         sleep(2+cooldown)
 
         "Проверяем что суд нашёлся в системе"
-        if pixel(422,480) == (83, 106, 194):
-            
-            "Выбираем найденный суд"
-            click(422,480)
-            sleep(2+cooldown)
-        
-        else:
+        if not check_color((83, 106, 194)):
             "Возвращаем ошибку, прерываем заполнение"
-            for _ in range(7):
+            for _ in range(3):
                 press('esc')
                 sleep(2+cooldown)
                 
@@ -147,12 +251,16 @@ def court_tab(
             for _ in range(5):
                 press('esc')
                 sleep(2+cooldown)
-                
             return ("Суд не найден", False)
 
     "- ПОЛЕ ДАТА 1 -"
     "Нажимаем на дату 1"
-    click(412,539)
+    press('enter')
+    sleep(0.5+cooldown)
+    press('tab')
+    sleep(0.5+cooldown)
+    press('tab')
+    sleep(0.5+cooldown)
 
     "Выделяем всё, чтобы скопировать"
     hotkey('ctrl', 'a', interval=0.5)
@@ -165,9 +273,6 @@ def court_tab(
     sleep(1+cooldown)
 
     if getFromBuffer().strip() == '  .  .    '.strip():
-        "Нажимаем на дату 1"
-        click(412,539)
-        
         "Выделяем всё, чтобы удалить"
         hotkey('ctrl', 'a', interval=0.5)
         sleep(2+cooldown)
@@ -184,7 +289,9 @@ def court_tab(
         
     "- ПОЛЕ ДАТА 2 -"
     "Нажимаем на дату 2"
-    click(1011,538)
+    for _ in range(3):
+        press('tab')
+        sleep(0.5+cooldown)
 
     "Выделяем всё, чтобы скопировать"
     hotkey('ctrl', 'a', interval=0.5)
@@ -196,10 +303,7 @@ def court_tab(
     hotkey('ctrl', 'c', interval=0.5)
     sleep(1+cooldown)
 
-    if getFromBuffer().strip() == '  .  .    '.strip():
-        "Нажимаем на дату 2"
-        click(1011,538)
-        
+    if getFromBuffer().strip() == '  .  .    '.strip():   
         "Выделяем всё, чтобы удалить"
         hotkey('ctrl', 'a', interval=0.5)
         sleep(2+cooldown)
@@ -217,29 +321,30 @@ def court_tab(
     "- ПОЛЕ РЕЗУЛЬТАТ ПО ДЕЛУ -"
 
     "Нажимаем на выбор результата"
-    click(2174, 538)
-    sleep(2+cooldown)
+    for _ in range(2):
+        press('tab')
+        sleep(0.5+cooldown)
 
     "Пролистываем в начало"
-    for _ in range(12):
+    for _ in range(13):
         press('up')
-        sleep(1+cooldown)
+        sleep(0.5+cooldown)
 
     if result_case == "удп": #9
         for _ in range(9):
             press('down')
-            sleep(1+cooldown)
+            sleep(0.5+cooldown)
 
     elif result_case == "удч": #10
         for _ in range(10):
             press('down')
-            sleep(1+cooldown)
+            sleep(0.5+cooldown)
 
 
     elif result_case == "отк": #7
         for _ in range(7):
             press('down')
-            sleep(1+cooldown)
+            sleep(0.5+cooldown)
             
     "Нажимаем enter чтобы применить"
     press("enter")
@@ -247,505 +352,322 @@ def court_tab(
 
     "ВЫПЛАТЫ"
     "Нажимаем на таб выплаты"
-    click(269,295)
+    hotkey('ctrl', 'pagedown', interval=0.5)
 
     "Нажимаем на первую строку на номер"
-    click(197,363)
+    press('right')
     sleep(1+cooldown)
 
+    "Копируем, чтобы проверить по буфферу"
+    addToBuffer("none")
+    sleep(1+cooldown)
+    hotkey('ctrl', 'c', interval=0.5)
+    sleep(1+cooldown)
+    
     "Поверяем присутствие платежа"
-    if pixel(197,363) != (85, 105, 194):
-        "Платежей нет, добавляем первый"
-        "Добавляем страховой платеж ЦБД000031"
-        
-        "Нажимаем на первую строку на номер"
-        click(197,363)
-        sleep(1+cooldown)
-        
-        "Создаём строку"
+    if getFromBuffer() == 'none':
+        "Платежей нет"
+        "Добавляем первый"
         press('down')
-        sleep(2+cooldown)
-        press('down')
-        sleep(2+cooldown)
+        sleep(0.5+cooldown)
+        press('enter')
+        sleep(3+cooldown)
         
-        "Переключаемся на поиск"
-        hotkey('ctrl', 'f', interval=0.5)
-        sleep(2+cooldown)
-        
+        "Ищем страховой платеж"
+        hotkey('ctrl','f',interval=0.5)
+
         "Вводим номер статуса платежа"
         addToBuffer("ЦБД000031")
         sleep(1+cooldown)
         hotkey('ctrl', 'v', interval=0.5)
-        sleep(2+cooldown)
+        sleep(10+cooldown)
         
         "Подтверждаем выбор"
-        for _ in range(3):
+        for _ in range(2):
             press('enter')
             sleep(2+cooldown)
-            
-        "Вводим номер статуса платежа"
+
+        sleep(1+cooldown)
+        hotkey('ctrl', 'c', interval=0.5)
+        sleep(1+cooldown)
+        
+        if getFromBuffer() == 'Страховое возмещение':
+            press('enter')
+            sleep(1+cooldown)
+        
+        else:
+            "Завершаем текущую сессию"
+            press('esc')
+            sleep(1+cooldown)
+            press('esc')
+            sleep(1+cooldown)
+            press('right')
+            sleep(1+cooldown)
+            press('enter')
+            for _ in range(5):
+                press('esc')
+                sleep(1+cooldown)
+            return ("В справочнике нет Страховое возмещение", False)
+
+        "Вводим номер запрошенную сумму"
         addToBuffer(summ_requests_s)
         sleep(1+cooldown)
         hotkey('ctrl', 'v', interval=0.5)
-        sleep(2+cooldown)
+        sleep(0.5+cooldown)
         
-        "Подтверждаем выбор"
+        sleep(0.5+cooldown)
         press('enter')
-        sleep(2+cooldown)
         
-        "Вводим номер статуса платежа"
+        "Вводим реальную сумму сумму"
         addToBuffer(summ_real_s)
         sleep(1+cooldown)
         hotkey('ctrl', 'v', interval=0.5)
-        sleep(2+cooldown)
-        
-        "Подтверждаем выбор"
+        sleep(0.5+cooldown)
         press('enter')
-        sleep(2+cooldown)
+        sleep(0.5+cooldown)
         
-        "Гос пошлины ЦБД000016"
+        "Открываем окно поиска"
+        sleep(0.5+cooldown)
+        press('enter')
+        sleep(3+cooldown)
         
-        "Создаём строку"
-        press('down')
-        sleep(2+cooldown)
-        press('down')
-        sleep(2+cooldown)
-        
-        "Переключаемся на поиск"
-        hotkey('ctrl', 'f', interval=0.5)
-        sleep(2+cooldown)
-        
+        "Ищем госпощлину платеж"
+        hotkey('ctrl','f',interval=0.5)
+
         "Вводим номер статуса платежа"
         addToBuffer("ЦБД000016")
         sleep(1+cooldown)
         hotkey('ctrl', 'v', interval=0.5)
-        sleep(2+cooldown)
+        sleep(10+cooldown)
         
         "Подтверждаем выбор"
-        for _ in range(3):
+        for _ in range(2):
             press('enter')
             sleep(2+cooldown)
-            
-        "Вводим номер статуса платежа"
+
+        sleep(1+cooldown)
+        hotkey('ctrl', 'c', interval=0.5)
+        sleep(1+cooldown)
+        
+        if getFromBuffer() == 'Государственная пошлина (истец)':
+            press('enter')
+            sleep(1+cooldown)
+        
+        else:
+            "Завершаем текущую сессию"
+            press('esc')
+            sleep(1+cooldown)
+            press('esc')
+            sleep(1+cooldown)
+            press('right')
+            sleep(1+cooldown)
+            press('enter')
+            for _ in range(5):
+                press('esc')
+                sleep(1+cooldown)
+            return ("В справочнике нет Госпошлины", False)
+        
+        "Вводим номер запрошенную сумму"
         addToBuffer(summ_requests_g)
         sleep(1+cooldown)
         hotkey('ctrl', 'v', interval=0.5)
-        sleep(2+cooldown)
+        sleep(0.5+cooldown)
         
-        "Подтверждаем выбор"
+        sleep(0.5+cooldown)
         press('enter')
-        sleep(2+cooldown)
         
-        "Вводим номер статуса платежа"
+        "Вводим реальную сумму сумму"
         addToBuffer(summ_real_g)
         sleep(1+cooldown)
         hotkey('ctrl', 'v', interval=0.5)
-        sleep(2+cooldown)
+        sleep(0.5+cooldown)
         
-    else:  
-        "Нажимаем на первую строку на номер"
-        click(197,363)
-        sleep(1+cooldown)
-            
-        "Переводим вправо, чтобы проверить что"
-        press("right")
-        sleep(1+cooldown)
-
-        "Нажимаем enter, чтобы проверить название выплаты"
-        press('enter')
-        sleep(1+cooldown)
-
-        "Выделяем всё, чтобы скопировать"
-        hotkey('ctrl', 'a', interval=0.5)
-        sleep(2+cooldown)
-
-        "Копируем, чтобы проверить по буфферу"
-        addToBuffer("none")
-        sleep(1+cooldown)
-        hotkey('ctrl', 'c', interval=0.5)
-        sleep(1+cooldown)
-
-        "Проверяем чтобы существовала любая из выплат"
-        if getFromBuffer() == "Страховое возмещение" or getFromBuffer() == "Государственная пошлина (истец)":
-            if getFromBuffer() == "Страховое возмещение":
-                summ_s_check=True
-                "Проверяем запрошенную сумму"
-                press('esc')
-                sleep(1+cooldown)
-                press('right')
-                sleep(1+cooldown)
-                press('enter')
-                
-                "Копируем, чтобы проверить по буфферу"
-                addToBuffer("none")
-                sleep(1+cooldown)
-                hotkey('ctrl', 'c', interval=0.5)
-                sleep(1+cooldown)
-                
-                if getFromBuffer() == "0,00":
-                    "Выделяем всё, чтобы заменить"
-                    hotkey('ctrl', 'a', interval=0.5)
-                    sleep(2+cooldown)
-                    
-                    "Вводим сумму"
-                    addToBuffer(summ_requests_s)
-                    sleep(1+cooldown)
-                    hotkey('ctrl', 'v', interval=0.5)
-                    sleep(2+cooldown)
-                    
-                    press('enter')
-                    sleep(2+cooldown)
-                    
-                else:
-                    press('esc')
-                    sleep(2+cooldown)
-                
-                "Проверяем одобренную сумму"
-                press('right')
-                sleep(2+cooldown)
-                press('enter')
-                sleep(2+cooldown)
-                
-                "Копируем, чтобы проверить по буфферу"
-                addToBuffer("none")
-                sleep(1+cooldown)
-                hotkey('ctrl', 'c', interval=0.5)
-                sleep(1+cooldown)
-                
-                if getFromBuffer() == "0,00":
-                    "Выделяем всё, чтобы заменить"
-                    hotkey('ctrl', 'a', interval=0.5)
-                    sleep(2+cooldown)
-                    
-                    "Вводим сумму"
-                    addToBuffer(summ_real_s)
-                    sleep(1+cooldown)
-                    hotkey('ctrl', 'v', interval=0.5)
-                    sleep(2+cooldown)
-                    
-                    press('enter')
-                    sleep(2+cooldown)
-                    
-                else:
-                    press('esc')
-                    sleep(2+cooldown)
-                    
-            if getFromBuffer() == "Государственная пошлина (истец)":
-                summ_g_check=True
-                "Проверяем запрошенную сумму"
-                press('esc')
-                sleep(1+cooldown)
-                press('right')
-                sleep(1+cooldown)
-                press('enter')
-                
-                "Копируем, чтобы проверить по буфферу"
-                addToBuffer("none")
-                sleep(1+cooldown)
-                hotkey('ctrl', 'c', interval=0.5)
-                sleep(1+cooldown)
-                
-                if getFromBuffer() == "0,00":
-                    "Выделяем всё, чтобы заменить"
-                    hotkey('ctrl', 'a', interval=0.5)
-                    sleep(2+cooldown)
-                    
-                    "Вводим сумму"
-                    addToBuffer(summ_requests_g)
-                    sleep(1+cooldown)
-                    hotkey('ctrl', 'v', interval=0.5)
-                    sleep(2+cooldown)
-                    
-                    press('enter')
-                    sleep(2+cooldown)
-                    
-                else:
-                    press('esc')
-                    sleep(2+cooldown)
-                
-                "Проверяем одобренную сумму"
-                press('right')
-                sleep(2+cooldown)
-                press('enter')
-                sleep(2+cooldown)
-                
-                "Копируем, чтобы проверить по буфферу"
-                addToBuffer("none")
-                sleep(1+cooldown)
-                hotkey('ctrl', 'c', interval=0.5)
-                sleep(1+cooldown)
-                
-                if getFromBuffer() == "0,00":
-                    "Выделяем всё, чтобы заменить"
-                    hotkey('ctrl', 'a', interval=0.5)
-                    sleep(2+cooldown)
-                    
-                    "Вводим сумму"
-                    addToBuffer(summ_real_g)
-                    sleep(1+cooldown)
-                    hotkey('ctrl', 'v', interval=0.5)
-                    sleep(2+cooldown)
-                    
-                    press('enter')
-                    sleep(2+cooldown)
-                    
-                else:
-                    press('esc')
-                    sleep(2+cooldown)
-                    
-        "Нажимаем на первую строку на номер"
-        click(197,363)
-        sleep(1+cooldown)
-
-        "Переводим вниз, чтобы проверить переключиться на следущую строку"
-        press("down")
-        sleep(1+cooldown)
-
-        "Переводим вправо, чтобы проверить что"
-        press("right")
-        sleep(1+cooldown)
-
-        "Нажимаем enter, чтобы проверить название выплаты"
-        press('enter')
-        sleep(1+cooldown)
-
-        "Выделяем всё, чтобы скопировать"
-        hotkey('ctrl', 'a', interval=0.5)
-        sleep(2+cooldown)
-
-
-        "Копируем, чтобы проверить по буфферу"
-        addToBuffer("none")
-        sleep(1+cooldown)
-        hotkey('ctrl', 'c', interval=0.5)
-        sleep(1+cooldown)
+        "Кнопку провести и закрыть"
+        for _ in range(8):
+            hotkey('shift', 'tab', interval=0.5)
+            sleep(0.1+cooldown)
         
-        "Проверяем чтобы существовала любая из выплат"
-        if getFromBuffer() == "Страховое возмещение" or getFromBuffer() == "Государственная пошлина (истец)":
-            if getFromBuffer() == "Страховое возмещение":
-                summ_s_check=True
-                "Проверяем запрошенную сумму"
-                press('esc')
-                sleep(1+cooldown)
-                press('right')
-                sleep(1+cooldown)
-                press('enter')
-                
+    else:
+        rcg = False
+        rcs = False
+        while not rcg or not rcs:
+            while getFromBuffer() != "Государственная пошлина (истец)" and getFromBuffer() != "Страховое возмещение" and getFromBuffer() != 'none':
+                press('down')
                 "Копируем, чтобы проверить по буфферу"
                 addToBuffer("none")
                 sleep(1+cooldown)
                 hotkey('ctrl', 'c', interval=0.5)
                 sleep(1+cooldown)
-                
-                if getFromBuffer() == "0,00":
-                    "Выделяем всё, чтобы заменить"
-                    hotkey('ctrl', 'a', interval=0.5)
-                    sleep(2+cooldown)
+            else:
+                buffer = getFromBuffer()
+                if buffer == 'Государственная пошлина (истец)' or buffer == "Страховое возмещение":
+                    press('right')
+                    sleep(0.5+cooldown)
                     
-                    "Вводим сумму"
-                    addToBuffer(summ_requests_s)
+                    "Копируем, чтобы проверить по буфферу"
+                    addToBuffer("none")
+                    sleep(0.5+cooldown)
+                    hotkey('ctrl', 'c', interval=0.5)
+                    sleep(0.5+cooldown)
+                    
+                    "Проверяем чтобы сумма была указана иначе заполняем"
+                    if getFromBuffer() == 'none':
+                        press('enter')
+                        sleep(0.5+cooldown)
+                        "Вводим, запрошенную сумму"
+                        addToBuffer(summ_requests_g if buffer == "Государственная пошлина (истец)" else summ_requests_s)
+                        sleep(0.5+cooldown)
+                        hotkey('ctrl', 'v', interval=0.5)
+                        sleep(0.5+cooldown)  
+                        press('enter')
+                        sleep(0.5+cooldown)  
+                        
+                    press('right')                
+                    sleep(0.5+cooldown) 
+                    
+                    "Копируем, чтобы проверить по буфферу"
+                    addToBuffer("none")
+                    sleep(0.5+cooldown)
+                    hotkey('ctrl', 'c', interval=0.5)
+                    sleep(0.5+cooldown)
+                    
+                    "Проверяем чтобы сумма была указана иначе заполняем"
+                    if getFromBuffer() == 'none':
+                        press('enter')
+                        sleep(0.5+cooldown)
+                        "Вводим, запрошенную сумму"
+                        addToBuffer(summ_real_g  if buffer == "Государственная пошлина (истец)" else summ_real_s)
+                        sleep(0.5+cooldown)
+                        hotkey('ctrl', 'v', interval=0.5)
+                        sleep(0.5+cooldown)  
+                        press('enter')
+                        sleep(0.5+cooldown) 
+                    
+                    press('left')
+                    sleep(0.5+cooldown) 
+                    press('left')
+                    sleep(0.5+cooldown) 
+                    if buffer == "Государственная пошлина (истец)":
+                        rcg=True
+                    else:
+                        rcs = True
+                        
+                if buffer == 'none':
+                    choice = 'none'
+                    press('enter')
+                    sleep(3+cooldown)
+                    
+                    "Ищем страховой платеж"
+                    hotkey('ctrl','f',interval=0.5)
+
+                    "Вводим номер статуса платежа"
+                    if rcg == False:
+                        choice = 'rcg'
+                        addToBuffer("ЦБД000016")
+                    elif rcs == False:
+                        choice = 'rcs'
+                        addToBuffer("ЦБД000031")
                     sleep(1+cooldown)
                     hotkey('ctrl', 'v', interval=0.5)
-                    sleep(2+cooldown)
+                    sleep(10+cooldown)
                     
-                    press('enter')
-                    sleep(2+cooldown)
+                    "Подтверждаем выбор"
+                    for _ in range(2):
+                        press('enter')
+                        sleep(2+cooldown)
+
+                    sleep(1+cooldown)
+                    hotkey('ctrl', 'c', interval=0.5)
+                    sleep(1+cooldown)
                     
-                else:
-                    press('esc')
-                    sleep(2+cooldown)
-                
-                "Проверяем одобренную сумму"
-                press('right')
-                sleep(2+cooldown)
-                press('enter')
-                sleep(2+cooldown)
-                
-                "Копируем, чтобы проверить по буфферу"
-                addToBuffer("none")
-                sleep(1+cooldown)
-                hotkey('ctrl', 'c', interval=0.5)
-                sleep(1+cooldown)
-                
-                if getFromBuffer() == "0,00":
-                    "Выделяем всё, чтобы заменить"
-                    hotkey('ctrl', 'a', interval=0.5)
-                    sleep(2+cooldown)
+                    if (getFromBuffer() == 'Страховое возмещение' and choice == 'rcs') or (getFromBuffer() == "Государственная пошлина (истец)" and choice == 'rcg'):
+                        press('enter')
+                        sleep(1+cooldown)
                     
-                    "Вводим сумму"
-                    addToBuffer(summ_real_s)
+                    else:
+                        "Завершаем текущую сессию"
+                        press('esc')
+                        sleep(1+cooldown)
+                        press('esc')
+                        sleep(1+cooldown)
+                        press('right')
+                        sleep(1+cooldown)
+                        press('enter')
+                        for _ in range(5):
+                            press('esc')
+                            sleep(1+cooldown)
+                        return ("В справочнике нет Страховое возмещение", False)
+
+                    "Вводим номер запрошенную сумму"
+                    if choice == 'rcs':
+                        addToBuffer(summ_requests_s)
+                    elif choice == 'rcg':
+                        addToBuffer(summ_requests_g)
+
                     sleep(1+cooldown)
                     hotkey('ctrl', 'v', interval=0.5)
-                    sleep(2+cooldown)
+                    sleep(0.5+cooldown)
                     
+                    sleep(0.5+cooldown)
                     press('enter')
-                    sleep(2+cooldown)
                     
-                else:
-                    press('esc')
-                    sleep(2+cooldown)
-                    
-            if getFromBuffer() == "Государственная пошлина (истец)":
-                summ_g_check=True
-                "Проверяем запрошенную сумму"
-                press('esc')
-                sleep(1+cooldown)
-                press('right')
-                sleep(1+cooldown)
-                press('enter')
-                
-                "Копируем, чтобы проверить по буфферу"
-                addToBuffer("none")
-                sleep(1+cooldown)
-                hotkey('ctrl', 'c', interval=0.5)
-                sleep(1+cooldown)
-                
-                if getFromBuffer() == "0,00":
-                    "Выделяем всё, чтобы заменить"
-                    hotkey('ctrl', 'a', interval=0.5)
-                    sleep(2+cooldown)
-                    
-                    "Вводим сумму"
-                    addToBuffer(summ_requests_g)
+                    "Вводим реальную сумму сумму"
+                    if choice == 'rcs':
+                        addToBuffer(summ_real_s)                  
+                    elif choice == 'rcg':
+                        addToBuffer(summ_real_g)
+
                     sleep(1+cooldown)
                     hotkey('ctrl', 'v', interval=0.5)
-                    sleep(2+cooldown)
-                    
+                    sleep(0.5+cooldown)
                     press('enter')
-                    sleep(2+cooldown)
-                    
-                else:
+                    sleep(0.5+cooldown)
                     press('esc')
-                    sleep(2+cooldown)
-                
-                "Проверяем одобренную сумму"
-                press('right')
-                sleep(2+cooldown)
-                press('enter')
-                sleep(2+cooldown)
-                
-                "Копируем, чтобы проверить по буфферу"
-                addToBuffer("none")
-                sleep(1+cooldown)
-                hotkey('ctrl', 'c', interval=0.5)
-                sleep(1+cooldown)
-                
-                if getFromBuffer() == "0,00":
-                    "Выделяем всё, чтобы заменить"
-                    hotkey('ctrl', 'a', interval=0.5)
-                    sleep(2+cooldown)
-                    
-                    "Вводим сумму"
-                    addToBuffer(summ_real_g)
-                    sleep(1+cooldown)
-                    hotkey('ctrl', 'v', interval=0.5)
-                    sleep(2+cooldown)
-                    
-                    press('enter')
-                    sleep(2+cooldown)
-                    
-                else:
-                    press('esc')
-                    sleep(2+cooldown)
-                    
+                    sleep(0.5+cooldown)
+                    if choice == 'rcs':
+                        rcs=True                 
+                    elif choice == 'rcg':
+                        rcg=True
         else:
-            "Добавляем новую строку с выплатой"
-            if summ_s_check == False:
-                "Добавляем страховой платеж ЦБД000031"
-                
-                "Переключаемся на поиск"
-                hotkey('ctrl', 'f', interval=0.5)
-                sleep(2+cooldown)
-                
-                "Вводим номер статуса платежа"
-                addToBuffer("ЦБД000031")
-                sleep(1+cooldown)
-                hotkey('ctrl', 'v', interval=0.5)
-                sleep(2+cooldown)
-                
-                "Подтверждаем выбор"
-                for _ in range(3):
-                    press('enter')
-                    sleep(2+cooldown)
-                    
-                "Вводим номер статуса платежа"
-                addToBuffer(summ_requests_s)
-                sleep(1+cooldown)
-                hotkey('ctrl', 'v', interval=0.5)
-                sleep(2+cooldown)
-                
-                "Подтверждаем выбор"
-                press('enter')
-                sleep(2+cooldown)
-                
-                "Вводим номер статуса платежа"
-                addToBuffer(summ_real_s)
-                sleep(1+cooldown)
-                hotkey('ctrl', 'v', interval=0.5)
-                sleep(2+cooldown)
-                
+            "Кнопку провести и закрыть"
+            for _ in range(5):
+                press('tab')
+                sleep(0.5+cooldown)  
+            press('enter')
+            sleep(10+cooldown) 
             
-            if summ_g_check == False:
-                "Гос пошлины ЦБД000016"
-                
-                "Переключаемся на поиск"
-                hotkey('ctrl', 'f', interval=0.5)
-                sleep(2+cooldown)
-                
-                "Вводим номер статуса платежа"
-                addToBuffer("ЦБД000016")
-                sleep(1+cooldown)
-                hotkey('ctrl', 'v', interval=0.5)
-                sleep(2+cooldown)
-                
-                "Подтверждаем выбор"
-                for _ in range(3):
-                    press('enter')
-                    sleep(2+cooldown)
-                    
-                "Вводим номер статуса платежа"
-                addToBuffer(summ_requests_g)
-                sleep(1+cooldown)
-                hotkey('ctrl', 'v', interval=0.5)
-                sleep(2+cooldown)
-                
-                "Подтверждаем выбор"
-                press('enter')
-                sleep(2+cooldown)
-                
-                "Вводим номер статуса платежа"
-                addToBuffer(summ_real_g)
-                sleep(1+cooldown)
-                hotkey('ctrl', 'v', interval=0.5)
-                sleep(2+cooldown)
-                
-    "Нажимаем провести и закрыть"   
-    click(246,265)   
-    sleep(20+cooldown)
+    _case_to_court=False
+    _case_to_public=False
+    "Кнопка передать в суд — зелёная (204,255,216), допуск ±15"
+    pos = find_button_center_in_region(BUTTON_PANEL_REGION, GREEN_TRANSFER_RGB, tolerance_abs=15, min_pixels=10)
+    if pos:
+        _case_to_court=True
+        click(pos[0], pos[1])
+        sleep(0.5 + cooldown)
+        "Кнопка дело в суде нажата"
+        sleep(20 + cooldown)
+        
+    #Долгое ожидание перед второй кнопкой
+    sleep(30+cooldown)
+    # Кнопка «В пользу общества» (зелёная) или «Не в пользу общества» (красная)
+    target_rgb = RED_BUTTON_RGB if result_case == "отк" else GREEN_BUTTON_RGB
+    pos = find_button_center_in_region(BUTTON_PANEL_REGION, target_rgb, tolerance_abs=15 if "удп" != "отк" else None, min_pixels=10)
+    if pos:
+        _case_to_public=True
+        click(pos[0], pos[1])
+        sleep(0.5 + cooldown)
+        "Кнопка с обществом нажата"
+        sleep(20 + cooldown)
+        
     
-    _case_to_court = False
-    "Дело передаём в суд"
-    if pixel(2092,1343) == (204, 255, 216) and pixel(1952,1344) != (135, 206, 250):
-        _case_to_court = True
-        "Нажимаем на кнопку"
-        click(2092,1343)
-        sleep(25+cooldown)
-
-    _case_to_public = False
-    "Дело в пользу общества или нет"
-    if pixel(2361,1342) == (146, 236, 146) and pixel(2232,1339) == (254, 163, 122):
-        _case_to_public = True
-        if result_case == "отк":
-            "Нажимаем не в пользу общества"
-            click(2232,1339)
-            sleep(25+cooldown)
-        else:
-            "Нажимаем в пользу общества"
-            click(2361,1342)
-            sleep(25+cooldown)
-            
+    sleep(25+cooldown)
+    press('esc')
+    sleep(10+cooldown)
+    press('enter')
+    sleep(15+cooldown)
+    
     return (f"Вкладка суд успешно заполнена. Прожата кнопка передать дело в суд: {_case_to_court}. Прожата кнопка В пользу/Не в пользу общества: {_case_to_public}.", True)       
-   
+
 def court_tab_check(cooldown=0):   
     "Проваливаемся во вкладку суд"
     click(2518,630)

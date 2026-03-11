@@ -1,26 +1,35 @@
 from pyautogui import click, press, rightClick, pixel, hotkey
 from time import sleep
-from worker.utils import addToBuffer
+from worker.utils import addToBuffer, getFromBuffer
 
 #Поиск дела открытие вкладки с поиском
 def search_case(number_case, cooldown = 0):
     "#Нажимаем мои задачи"
-    click(56,160)
+    hotkey('alt', '2', interval=0.5)
+    sleep(1+cooldown)
+    for _ in range(2):
+        press('down')
+        sleep(1+cooldown)
+    press('up')
+    sleep(1+cooldown)
+    press('enter')
     sleep(15+cooldown)
+    
+    "Переходим на поиск"
+    for _ in range(3):
+        press('tab')
+        sleep(0.5+cooldown)
+        
+    "Передвигаемся на нужную колонку"
+    for _ in range(2):
+        press('right')
+        sleep(0.5+cooldown)   
 
     "#Открываем поиск"
-    rightClick(822,337)
-    sleep(3+cooldown)
-
-    "#Нажимаем найти лупу"
-    press("down")
+    hotkey('ctrl', 'f', interval=0.5)
     sleep(3+cooldown)
     
-    "Нажимаем поиск ентер"
-    press('enter')
-    sleep(2+cooldown)
-    
-    "Вводим имя ответчика"
+    "Вводим номер дела"
     addToBuffer(number_case)
     sleep(1+cooldown)
     hotkey('ctrl', 'v', interval=0.5)
@@ -34,7 +43,10 @@ def search_case(number_case, cooldown = 0):
     press('enter')
     sleep(2+cooldown)
     
-    if pixel(479,386) == (255, 255, 255):
+    "Проверяем что нашли"
+    hotkey('ctrl', 'c', interval=0.5)
+    sleep(1+cooldown)
+    if number_case in getFromBuffer():
         "Нажимаем поиск ентер"
         press('enter')
         sleep(2+cooldown)
@@ -42,9 +54,9 @@ def search_case(number_case, cooldown = 0):
         return (f"Дело {number_case} успешно найдено", True)
     else:
         press('esc')
-        sleep(2+cooldown)
+        sleep(1+cooldown)
         press('esc')
-        sleep(2+cooldown)
+        sleep(1+cooldown)
         press('esc')
-        sleep(2+cooldown)
+        sleep(1+cooldown)
         return (f"Дело {number_case} не обнаружено", False)

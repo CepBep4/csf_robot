@@ -2,6 +2,7 @@ import calendar
 from datetime import datetime
 from robot_log import get_logger
 from robot_state import is_stop_requested
+from worker import hande_case_by_setting_information_to_1c
 
 
 def validate_before_setting(case: dict) -> dict:
@@ -92,8 +93,24 @@ def interface_start(mode: str, data: dict | list):
             pass
 
         elif mode == "set":
-            for case in data[:3]:
-                case = validate_before_setting(case)
+            if not isinstance(data, list):
+                data = [data]
+            results = []
+            for i, case in enumerate(data):
+                if is_stop_requested():
+                    log.warning("Остановка по запросу пользователя после %s из %s дел", i, len(data))
+                    break
+                try:
+                    case = validate_before_setting(case)
+                except ValueError as e:
+                    log.error("Дело %s: ошибка валидации — %s", case.get("number_case", i + 1), e)
+                    results.append({"number_case": case.get("number_case"), "ok": False, "message": str(e)})
+                    continue
+                log.info("Обработка дела %s (%s из %s)", case.get("number_case"), i + 1, len(data))
+                msg = hande_case_by_setting_information_to_1c(case)
+                results.append({"number_case": case.get("number_case"), "ok": "успешно" in msg or "завершён" in msg.lower(), "message": msg})
+                log.info("Дело %s: %s", case.get("number_case"), msg)
+            return results
         elif mode == "download":
             pass
 

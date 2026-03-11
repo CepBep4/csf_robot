@@ -19,6 +19,7 @@ import csv
 from robot_run import run as run_robot
 from robot_state import request_stop_run
 from robot_payload import normalize_robot_payload
+import robot_last_results
 from robot import validate_before_setting
 from worker.unziper import unzip_all_in_dir
 
@@ -295,6 +296,9 @@ ADMIN_HTML = """
           <button type="button" id="fill1cRunBtn" class="nav-btn">Запустить</button>
           <button type="button" id="fill1cStopBtn" class="nav-btn nav-btn-red" style="display:none;">Остановить</button>
           <div id="fill1cTimer" class="doc-status"></div>
+          <p style="margin-top:1em;">
+            <a href="/robot/download-last-run-results" class="nav-btn" download style="display:inline-block;text-decoration:none;">Скачать отчёт по последнему запуску (xlsx)</a>
+          </p>
         </div>
       </div>
     </div>
@@ -1641,6 +1645,40 @@ def robot_stop():
     return jsonify({"ok": True, "stopping": True})
 
 
+@app.route("/robot/download-last-run-results", methods=["GET"])
+def robot_download_last_run_results():
+    """
+    Скачать xlsx с результатами последнего запуска «Заполнить данные 1С»:
+    колонки: Номер дела, Успешно, Сообщение (лог по каждому делу).
+    """
+    results = getattr(robot_last_results, "last_results", None)
+    if not results:
+        return jsonify({"error": "Нет результатов последнего запуска для скачивания. Сначала выполните «Заполнить данные 1С»."}), 404
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Результаты заполнения"
+    headers = ["Номер дела", "Успешно", "Сообщение"]
+    for c, h in enumerate(headers, 1):
+        ws.cell(row=1, column=c, value=h)
+    for r, row in enumerate(results, 2):
+        ws.cell(row=r, column=1, value=row.get("number_case", ""))
+        ws.cell(row=r, column=2, value="Да" if row.get("ok") else "Нет")
+        ws.cell(row=r, column=3, value=row.get("message", ""))
+    ts = getattr(robot_last_results, "last_timestamp", None)
+    if ts:
+        ws.cell(row=1, column=4, value="Дата запуска")
+        ws.cell(row=2, column=4, value=ts.strftime("%d.%m.%Y %H:%M:%S") if hasattr(ts, "strftime") else str(ts))
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return send_file(
+        buf,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        as_attachment=True,
+        download_name="результаты_заполнения_1С.xlsx",
+    )
+
+
 # Папка по умолчанию для «Исправить названия файлов», если путь не указан
 UPLOADER_DIR = os.path.join(BASE_DIR, "uploader")
 
@@ -1680,4 +1718,4 @@ def health():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080, debug=True)
+    app.run(host="0.0.0.0", port=8080, debug=False)

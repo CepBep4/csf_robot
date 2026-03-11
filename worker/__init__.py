@@ -2,10 +2,9 @@ import json
 from pathlib import Path
 
 from robot_state import is_stop_requested
-from worker.court_tab import court_tab, court_tab_check
-from worker.ip_tab import ip_tab, ip_tab_check
-from worker.search_case import search_case
-from worker.download_mode import download_mode
+
+# Импорты court_tab, ip_tab, search_case, download_mode — отложенные (внутри функций),
+# чтобы сервер Flask мог стартовать без DISPLAY (headless); pyautogui нужен только при запуске робота.
 
 _config_path = Path(__file__).resolve().parent.parent / "config.json"
 with open(_config_path, encoding="utf-8") as f:
@@ -18,6 +17,10 @@ STAGE_SWITCH_DELAY = _config.get("delayStageSwitch", 10.0)
 
 "Запуск заполнения 1С"
 def hande_case_by_setting_information_to_1c(data: dict):
+    from worker.search_case import search_case
+    from worker.court_tab import court_tab
+    from worker.ip_tab import ip_tab
+
     if is_stop_requested():
         return "Остановлено по запросу пользователя"
     #Данные для поиска дела
@@ -67,7 +70,7 @@ def hande_case_by_setting_information_to_1c(data: dict):
             it = ip_tab(
                 view_ip_list=view_ip_list,
                 number_ip_list=number_ip_list,
-                summ=summ,
+                summ=summ+summ_real_g,
                 data_get_ip_list=data_get_ip_list,
                 cooldown=COURT_TAB_DELAY,
             )
@@ -88,6 +91,10 @@ def hande_case_by_setting_information_to_1c(data: dict):
 
 "Запуск проверки информации в 1С"
 def hande_case_by_checking_information_from_1c(number_case: str) -> dict:
+    from worker.search_case import search_case
+    from worker.court_tab import court_tab_check
+    from worker.ip_tab import ip_tab_check
+
     if is_stop_requested():
         return {}
     data_recieve = {}
@@ -124,6 +131,9 @@ def hande_case_by_checking_information_from_1c(number_case: str) -> dict:
 
 "Запуск скачивания файлов из 1С"
 def hande_case_by_downloading_information_from_1c(number_case: str):
+    from worker.search_case import search_case
+    from worker.download_mode import download_mode
+
     if is_stop_requested():
         return
     if search_case(number_case)[1]:

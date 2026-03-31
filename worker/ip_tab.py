@@ -1,6 +1,7 @@
 from pyautogui import click, press, pixel, hotkey, screenshot
 from time import sleep
 from worker.utils import addToBuffer, getFromBuffer
+from worker import BUTTON_PANEL_REGION
 
 def check_color(target_rgb, tolerance=5, region=None):
     """
@@ -96,8 +97,6 @@ def find_button_center_in_region(region, target_rgb, tolerance_pct=0.15, toleran
             return (left + cx, top + cy)
     return None
 
-# Область панели кнопок: левый верх (1710, 1248), правый низ (2545, 1363)
-BUTTON_PANEL_REGION = (1710, 1248, 835, 115)
 # Зелёная «Передать в суд» (другой оттенок)
 GREEN_IP_RGB = (156, 250, 156)
 
@@ -106,9 +105,8 @@ def ip_tab(
     number_ip_list: str, #В формате ФС №XXXX
     summ: float, #Сумма через xxx.yy
     data_get_ip_list: str, #Дата в формате день.месяц.год
-    cooldown = 0
+    cooldown = 0,
 ):
-    _ip_received=False
     ip_list_map = {
         "Оригинал исполнительного листа":3,
         "Постановление ФССП":4,
@@ -123,7 +121,7 @@ def ip_tab(
     "Открываем вкладу ИП"
     for _ in range(26):
         press('tab')
-        sleep(0.1+cooldown)
+        sleep(0.5+cooldown)
         
     "Выделяем всё, чтобы скопировать"
     hotkey('ctrl', 'a', interval=0.5)
@@ -136,10 +134,25 @@ def ip_tab(
     sleep(1+cooldown)
 
     if getFromBuffer() == 'none':
-        return ("Вкладка ИП не открылась", False)
-    
-    hotkey('ctrl', 'shift', 'f4', interval=0.5)
+        press('f4')
+    else:
+        hotkey('ctrl', 'shift', 'f4', interval=0.5)
     sleep(3+cooldown)
+    
+    #Проверяем факт открытия вкладки ИП
+    # hotkey('shift', 'tab', interval=0.5)
+    
+    # addToBuffer("none")
+    # sleep(1+cooldown)
+    # hotkey('ctrl', 'c', interval=0.5)
+    # sleep(1+cooldown)
+    
+    # try: 
+    #     int(getFromBuffer().replace('-',''))
+    #     press('tab')
+    #     sleep(1)
+    # except:
+    #     return ("Вкладка ип не открылась", False)
     
     "Переходим к виду исполнительного листа"
     for _ in range(2):
@@ -233,20 +246,9 @@ def ip_tab(
     press('enter')
     sleep(20+cooldown)
     
-    "Кнопка передать в суд — зелёная (204,255,216), допуск ±15"
-    pos = find_button_center_in_region(BUTTON_PANEL_REGION, GREEN_IP_RGB, tolerance_abs=15, min_pixels=10)
-    if pos:
-        _ip_received=True
-        click(pos[0], pos[1])
-        sleep(0.5 + cooldown)
-        "Кнопка ИП получено"
-        sleep(20 + cooldown)
-        
-    for _ in range(3):
-        press('esc')
-        sleep(10+cooldown)
+
     
-    return (f"Вкладка ИП успешно заполнена. Кнопка ИП получен нажата:{_ip_received}", True)
+    return ("Вкладка ИП успешно заполнена.", True)
     
 def ip_tab_check(cooldown = 0):
     "Открываем вкладу ИП"

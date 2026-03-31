@@ -2,7 +2,11 @@ import calendar
 from datetime import datetime
 from robot_log import get_logger
 from robot_state import is_stop_requested
-from worker import hande_case_by_setting_information_to_1c
+from worker import (
+    hande_case_by_setting_information_to_1c,
+    hande_case_by_downloading_information_from_1c,
+    handle_cancel_case_into_1c,
+)
 
 
 def validate_before_setting(case: dict) -> dict:
@@ -93,6 +97,7 @@ def interface_start(mode: str, data: dict | list):
             pass
 
         elif mode == "set":
+            from worker.modeAll import MODE_PROD_MAP, run_prod_mode
             if not isinstance(data, list):
                 data = [data]
             results = []
@@ -100,22 +105,89 @@ def interface_start(mode: str, data: dict | list):
                 if is_stop_requested():
                     log.warning("Остановка по запросу пользователя после %s из %s дел", i, len(data))
                     break
-                try:
-                    case = validate_before_setting(case)
-                except ValueError as e:
-                    log.error("Дело %s: ошибка валидации — %s", case.get("number_case", i + 1), e)
-                    results.append({"number_case": case.get("number_case"), "ok": False, "message": str(e)})
+                validate_before_run = bool(case.get("validateBeforeRun", True))
+                if validate_before_run:
+                    try:
+                        case = validate_before_setting(case)
+                    except ValueError as e:
+                        log.error("Дело %s: ошибка валидации — %s", case.get("number_case", i + 1), e)
+                        results.append({"number_case": case.get("number_case"), "ok": False, "message": str(e)})
+                        continue
+                set_info = case.get("setInfo") if isinstance(case, dict) else None
+                set_info = str(set_info).strip().lower() if set_info is not None else ""
+                # Приводим ключ к регистру словаря прод-режимов
+                prod_mode_map_ci = {str(k).strip().lower(): k for k in MODE_PROD_MAP.keys()}
+                if set_info not in ("court", "ip", "both") and set_info not in prod_mode_map_ci:
+                    msg = "Не выбран режим заполнения (setInfo)."
+                    log.error("Дело %s: %s", case.get("number_case", i + 1), msg)
+                    results.append({"number_case": case.get("number_case"), "ok": False, "message": msg})
                     continue
                 log.info("Обработка дела %s (%s из %s)", case.get("number_case"), i + 1, len(data))
-                msg = hande_case_by_setting_information_to_1c(case)
-                results.append({"number_case": case.get("number_case"), "ok": "успешно" in msg or "завершён" in msg.lower(), "message": msg})
+                if set_info in prod_mode_map_ci:
+                    mode_key = prod_mode_map_ci[set_info]
+                    step_logs = run_prod_mode(case, mode_key=mode_key)
+                    ok = len(step_logs) > 0 and all(bool(s.get("ok")) for s in step_logs)
+                    if step_logs:
+                        msg = step_logs[-1].get("message", "")
+                    else:
+                        msg = "Пустой план режима"
+                    results.append({
+                        "number_case": case.get("number_case"),
+                        "ok": ok,
+                        "message": msg,
+                        "mode": mode_key,
+                        "steps": step_logs,
+                    })
+                else:
+                    msg = hande_case_by_setting_information_to_1c(case, set_info)
+                    results.append({"number_case": case.get("number_case"), "ok": "успешно" in msg or "завершён" in msg.lower(), "message": msg})
                 log.info("Дело %s: %s", case.get("number_case"), msg)
             return results
         elif mode == "download":
-            pass
+            if not isinstance(data, list):
+                data = [data]
+            results = []
+            for i, item in enumerate(data):
+                if is_stop_requested():
+                    log.warning("Остановка по запросу пользователя после %s из %s дел", i, len(data))
+                    break
+                number_case = item.get("number_case", item) if isinstance(item, dict) else item
+                number_case = str(number_case).strip()
+                if not number_case:
+                    log.warning("Пропуск дела с пустым номером (индекс %s)", i + 1)
+                    results.append({"number_case": "", "ok": False, "message": "Пустой номер дела"})
+                    continue
+                log.info("Скачивание дела %s (%s из %s)", number_case, i + 1, len(data))
+                try:
+                    hande_case_by_downloading_information_from_1c(number_case)
+                    results.append({"number_case": number_case, "ok": True, "message": "Скачано"})
+                except Exception as e:
+                    log.exception("Дело %s: ошибка при скачивании — %s", number_case, e)
+                    results.append({"number_case": number_case, "ok": False, "message": str(e)})
+            return results
 
-        elif mode == "change_filename":
-            pass
+        elif mode == "cancel_case":
+            if not isinstance(data, list):
+                data = [data]
+            results = []
+            for i, item in enumerate(data):
+                if is_stop_requested():
+                    log.warning("Остановка по запросу пользователя после %s из %s дел", i, len(data))
+                    break
+                number_case = item.get("number_case", item) if isinstance(item, dict) else item
+                number_case = str(number_case).strip()
+                if not number_case:
+                    log.warning("Пропуск дела с пустым номером (индекс %s)", i + 1)
+                    results.append({"number_case": "", "ok": False, "message": "Пустой номер дела"})
+                    continue
+                log.info("Отмена дела %s (%s из %s)", number_case, i + 1, len(data))
+                try:
+                    handle_cancel_case_into_1c(number_case)
+                    results.append({"number_case": number_case, "ok": True, "message": "Отменено"})
+                except Exception as e:
+                    log.exception("Дело %s: ошибка при отмене — %s", number_case, e)
+                    results.append({"number_case": number_case, "ok": False, "message": str(e)})
+            return results
 
         log.info("Завершено: mode=%s", mode)
     except Exception as e:

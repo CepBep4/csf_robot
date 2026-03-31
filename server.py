@@ -11,10 +11,12 @@
 import os
 import json
 import threading
+import webbrowser
 from io import BytesIO, StringIO
 from flask import Flask, jsonify, send_from_directory, request, Response, send_file
 import openpyxl
 import csv
+import json as pyjson
 
 from robot_run import run as run_robot
 from robot_state import request_stop_run
@@ -47,6 +49,9 @@ FILL_1C_DATA_LIST = []
 
 # Список дел для «Загрузить информацию из 1С» (заполняется при нажатии «Начать»)
 LOAD_1C_CASE_LIST = []
+
+# Список дел для «Удалить дела из 1С» (заполняется при нажатии «Начать»)
+CANCEL_1C_CASE_LIST = []
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
@@ -185,7 +190,6 @@ ADMIN_HTML = """
       <button type="button" class="nav-btn" data-panel="doc">Проверить документ выгрузки</button>
       <button type="button" class="nav-btn nav-btn-yellow" data-panel="settings">Настройки</button>
       <button type="button" class="nav-btn nav-btn-yellow" data-panel="fixfiles">Исправить названия файлов</button>
-      <button type="button" class="nav-btn nav-btn-green" data-panel="check1c">Проверить данные 1С</button>
       <button type="button" class="nav-btn nav-btn-green" data-panel="fill1c">Заполнить данные 1С</button>
       <button type="button" class="nav-btn nav-btn-green" data-panel="load1c">Загрузить информацию из 1С</button>
     </div>
@@ -284,6 +288,27 @@ ADMIN_HTML = """
           <label for="fill1cFile">Файл с данными для заполнения (например, выгрузка из Excel):</label><br>
           <input type="file" id="fill1cFile" accept=".xlsx,.xls,.csv" />
         </div>
+        <div class="doc-upload-area">
+          <label for="fill1cSetInfo">Что заполнять:</label><br>
+          <select id="fill1cSetInfo" style="max-width:320px;">
+            <option value="" selected>— выберите —</option>
+            <option value="06_Ожидание итогов от аутсорсеров">06_Ожидание итогов от аутсорсеров</option>
+            <option value="07_Ожидание ответа по досудебному требованию">07_Ожидание ответа по досудебному требованию</option>
+            <option value="09_Ожидание решения суда">09_Ожидание решения суда</option>
+            <option value="11_Получение ИЛ">11_Получение ИЛ</option>
+            <option value="13_Исполнение ИЛ в ФССП">13_Исполнение ИЛ в ФССП</option>
+          </select>
+        </div>
+        <div class="doc-upload-area">
+          <label for="fill1cStageDelaySec">Задержка между этапами (сек):</label><br>
+          <input type="number" id="fill1cStageDelaySec" min="0" step="0.1" value="0" style="max-width:220px;" />
+        </div>
+        <div class="doc-upload-area">
+          <label for="fill1cValidateBeforeRun" style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+            <input type="checkbox" id="fill1cValidateBeforeRun" checked />
+            <span>Выполнять валидацию данных перед обработкой</span>
+          </label>
+        </div>
         <button type="button" id="fill1cStartBtn" class="nav-btn">Начать</button>
         <div id="fill1cStatus" class="doc-status"></div>
         <div id="fill1cCounts" class="doc-counts" style="display:none;">
@@ -339,6 +364,38 @@ ADMIN_HTML = """
           <button type="button" id="load1cRunBtn" class="nav-btn">Запустить</button>
           <button type="button" id="load1cStopBtn" class="nav-btn nav-btn-red" style="display:none;">Остановить</button>
           <div id="load1cTimer" class="doc-status"></div>
+        </div>
+      </div>
+    </div>
+    <div id="panel-cancel1c" class="screen">
+      <div class="panel-header">
+        <button type="button" class="back-btn" data-back>Вернуться</button>
+      </div>
+      <div class="panel-content">
+        <h1>Удалить дела из 1С</h1>
+        <p><strong>Перед запуском удаления выполните подготовку удалённого рабочего стола с 1С.</strong></p>
+        <ol>
+          <li>Подключитесь к удалённому серверу, на котором установлена 1С.</li>
+          <li>Запустите программу 1С (нужная вам база должна быть открыта).</li>
+          <li>Разверните окно 1С на весь экран в оконном режиме.</li>
+          <li>Закройте в 1С все открытые вкладки/формы, чтобы на экране оставалось только главное окно.</li>
+          <li>Убедитесь, что удалённый рабочий стол виден целиком и не перекрыт другими окнами.</li>
+        </ol>
+        <p>Скопируйте из Excel <strong>список номеров дел одним столбцом без заголовка</strong> и вставьте его сюда через Ctrl+V.</p>
+        <div class="doc-upload-area">
+          <label for="cancel1cPaste">Список номеров дел (один номер в строке):</label><br>
+          <textarea id="cancel1cPaste" rows="8" style="width:100%;" placeholder="Вставьте сюда список номеров дел из Excel (один столбец без заголовка)"></textarea>
+        </div>
+        <button type="button" id="cancel1cStartBtn" class="nav-btn">Начать</button>
+        <div id="cancel1cStatus" class="doc-status"></div>
+        <div id="cancel1cCounts" class="doc-counts" style="display:none;">
+          <p><strong>Будет обработано:</strong> <span id="cancel1cCanProcess">0</span></p>
+          <button type="button" id="cancel1cRunBtn" class="nav-btn">Запустить</button>
+          <button type="button" id="cancel1cStopBtn" class="nav-btn nav-btn-red" style="display:none;">Остановить</button>
+          <div id="cancel1cTimer" class="doc-status"></div>
+          <p style="margin-top:1em;">
+            <a href="/robot/download-last-cancel-results" class="nav-btn" download style="display:inline-block;text-decoration:none;">Скачать отчёт по последнему удалению (xlsx)</a>
+          </p>
         </div>
       </div>
     </div>
@@ -746,6 +803,9 @@ ADMIN_HTML = """
 
         // Заполнение данных 1С: валидация файла и запуск таймера (аналогично проверке)
         var fill1cFile = document.getElementById('fill1cFile');
+        var fill1cSetInfo = document.getElementById('fill1cSetInfo');
+        var fill1cStageDelaySec = document.getElementById('fill1cStageDelaySec');
+        var fill1cValidateBeforeRun = document.getElementById('fill1cValidateBeforeRun');
         var fill1cStartBtn = document.getElementById('fill1cStartBtn');
         var fill1cStatus = document.getElementById('fill1cStatus');
         var fill1cCounts = document.getElementById('fill1cCounts');
@@ -819,6 +879,18 @@ ADMIN_HTML = """
 
         if (fill1cRunBtn) {
           fill1cRunBtn.addEventListener('click', function() {
+            var setInfoValue = (fill1cSetInfo && fill1cSetInfo.value) ? fill1cSetInfo.value : '';
+            var stageDelaySecValue = 0;
+            if (fill1cStageDelaySec) {
+              var n = parseFloat(fill1cStageDelaySec.value);
+              stageDelaySecValue = (isNaN(n) || n < 0) ? 0 : n;
+            }
+            var validateBeforeRunValue = fill1cValidateBeforeRun ? !!fill1cValidateBeforeRun.checked : true;
+            if (!setInfoValue) {
+              if (fill1cTimer) fill1cTimer.textContent = '';
+              if (fill1cStatus) fill1cStatus.textContent = 'Выберите режим запуска.';
+              return;
+            }
             var totalSec2 = (typeof robotDelayBeforeRun === 'number' && robotDelayBeforeRun >= 0) ? robotDelayBeforeRun : 60;
             var secondsLeft2 = totalSec2;
             if (fill1cTimerId !== null) {
@@ -848,7 +920,12 @@ ADMIN_HTML = """
                 fetch('/robot/run', {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ mode: 'set' })
+                  body: JSON.stringify({
+                    mode: 'set',
+                    setInfo: setInfoValue,
+                    stageDelaySec: stageDelaySecValue,
+                    validateBeforeRun: validateBeforeRunValue
+                  })
                 })
                   .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }); })
                   .then(function(o) {
@@ -1035,6 +1112,124 @@ ADMIN_HTML = """
             load1cStopBtn.style.display = 'none';
           });
         }
+
+        // Удаление дел из 1С: список номеров через Ctrl+V и запуск таймера
+        var cancel1cPaste = document.getElementById('cancel1cPaste');
+        var cancel1cStartBtn = document.getElementById('cancel1cStartBtn');
+        var cancel1cStatus = document.getElementById('cancel1cStatus');
+        var cancel1cCounts = document.getElementById('cancel1cCounts');
+        var cancel1cCanProcess = document.getElementById('cancel1cCanProcess');
+        var cancel1cRunBtn = document.getElementById('cancel1cRunBtn');
+        var cancel1cStopBtn = document.getElementById('cancel1cStopBtn');
+        var cancel1cTimer = document.getElementById('cancel1cTimer');
+        var cancel1cTimerId = null;
+
+        if (cancel1cStartBtn && cancel1cPaste) {
+          cancel1cStartBtn.addEventListener('click', function() {
+            if (!cancel1cPaste.value || !cancel1cPaste.value.trim()) {
+              cancel1cStatus.textContent = 'Сначала вставьте список номеров дел из Excel.';
+              return;
+            }
+            cancel1cStatus.textContent = 'Считаю, сколько дел будет обработано...';
+            cancel1cCounts.style.display = 'none';
+            if (cancel1cTimerId !== null) {
+              clearInterval(cancel1cTimerId);
+              cancel1cTimerId = null;
+            }
+            if (cancel1cTimer) {
+              cancel1cTimer.textContent = '';
+            }
+            var fd4 = new FormData();
+            fd4.append('pasted_text', cancel1cPaste.value);
+            fetch('/check-cancel-list', { method: 'POST', body: fd4 })
+              .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }); })
+              .then(function(o) {
+                if (o.ok && o.data.ok) {
+                  cancel1cStatus.textContent = 'Готово. Проверьте количество дел перед запуском удаления.';
+                  if (cancel1cCanProcess) {
+                    cancel1cCanProcess.textContent = o.data.total;
+                  }
+                  if (cancel1cCounts) {
+                    cancel1cCounts.style.display = 'block';
+                  }
+                } else {
+                  cancel1cStatus.textContent = o.data.error || 'Ошибка обработки списка дел';
+                }
+              })
+              .catch(function(e) {
+                cancel1cStatus.textContent = 'Ошибка: ' + e;
+              });
+          });
+        }
+
+        if (cancel1cRunBtn) {
+          cancel1cRunBtn.addEventListener('click', function() {
+            var totalSec4 = (typeof robotDelayBeforeRun === 'number' && robotDelayBeforeRun >= 0) ? robotDelayBeforeRun : 60;
+            var secondsLeft4 = totalSec4;
+            if (cancel1cTimerId !== null) {
+              clearInterval(cancel1cTimerId);
+            }
+            if (cancel1cTimer) {
+              cancel1cTimer.textContent = 'Осталось ' + totalSec4 + ' секунд. Переключитесь на удалённый рабочий стол и не трогайте мышь и клавиатуру.';
+            }
+            cancel1cRunBtn.disabled = true;
+            if (cancel1cStopBtn) {
+              cancel1cStopBtn.style.display = 'inline-block';
+              cancel1cStopBtn.disabled = false;
+            }
+            cancel1cStartBtn && (cancel1cStartBtn.disabled = true);
+            cancel1cTimerId = setInterval(function() {
+              secondsLeft4 -= 1;
+              if (secondsLeft4 > 0) {
+                if (cancel1cTimer) {
+                  cancel1cTimer.textContent = 'Осталось ' + secondsLeft4 + ' секунд. Не трогайте мышь и клавиатуру.';
+                }
+              } else {
+                clearInterval(cancel1cTimerId);
+                cancel1cTimerId = null;
+                if (cancel1cTimer) {
+                  cancel1cTimer.textContent = totalSec4 + ' секунд прошло. Запускаю робота...';
+                }
+                fetch('/robot/run', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ mode: 'cancel_case' })
+                })
+                  .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }); })
+                  .then(function(o) {
+                    if (cancel1cTimer) {
+                      cancel1cTimer.textContent = o.ok
+                        ? totalSec4 + ' секунд прошло. Робот запущен. Смотрите robot.log.'
+                        : totalSec4 + ' секунд прошло. Ошибка: ' + (o.data.error || 'неизвестная');
+                    }
+                  })
+                  .catch(function(e) {
+                    if (cancel1cTimer) {
+                      cancel1cTimer.textContent = totalSec4 + ' секунд прошло. Ошибка запуска: ' + e;
+                    }
+                  });
+                cancel1cRunBtn.disabled = false;
+                cancel1cStartBtn && (cancel1cStartBtn.disabled = false);
+              }
+            }, 1000);
+          });
+        }
+
+        if (cancel1cStopBtn) {
+          cancel1cStopBtn.addEventListener('click', function() {
+            if (cancel1cTimerId !== null) {
+              clearInterval(cancel1cTimerId);
+              cancel1cTimerId = null;
+            }
+            fetch('/robot/stop', { method: 'POST' }).catch(function() {});
+            if (cancel1cTimer) {
+              cancel1cTimer.textContent = 'Остановка запрошена.';
+            }
+            cancel1cRunBtn && (cancel1cRunBtn.disabled = false);
+            cancel1cStartBtn && (cancel1cStartBtn.disabled = false);
+            cancel1cStopBtn.style.display = 'none';
+          });
+        }
       });
 
       var runBtn = document.getElementById('runBtn');
@@ -1192,6 +1387,26 @@ def _parse_pasted_table(text):
             row_dict[h] = row[idx] if idx < len(row) else ""
         data.append(row_dict)
     return headers, data
+
+
+@app.route("/check-cancel-list", methods=["POST"])
+def check_cancel_list():
+    """
+    Принимает текст, скопированный из Excel (один столбец без заголовка),
+    и формирует список дел для режима cancel_case.
+    """
+    global CANCEL_1C_CASE_LIST
+    pasted = request.form.get("pasted_text", "").strip()
+    if not pasted:
+        return jsonify({"ok": False, "error": "Не передан текст со списком дел."}), 400
+
+    lines = [line.strip() for line in pasted.splitlines() if line.strip()]
+    if not lines:
+        return jsonify({"ok": False, "error": "Список дел пустой."}), 400
+
+    cancel_case_list = [{"number_case": line} for line in lines]
+    CANCEL_1C_CASE_LIST = cancel_case_list
+    return jsonify({"ok": True, "total": len(cancel_case_list)})
 
 
 @app.route("/check-simple-list", methods=["POST"])
@@ -1605,15 +1820,48 @@ def settings():
 @app.route("/robot/run", methods=["POST"])
 def robot_run():
     """
-    Запуск робота из фронта. Тело запроса: {"mode": "check"|"set"|"download"|"change_filename", "data": ...}.
+    Запуск робота из фронта. Тело запроса: {"mode": "check"|"set"|"download"|"change_filename"|"cancel_case", "data": ...}.
     data нормализуется под выбранный режим и передаётся в run_robot(mode, data).
     Для mode "check" без data используется список дел из последней проверки (кнопка «Начать»).
     """
-    global CHECK_1C_CASE_LIST, FILL_1C_DATA_LIST, LOAD_1C_CASE_LIST
+    global CHECK_1C_CASE_LIST, FILL_1C_DATA_LIST, LOAD_1C_CASE_LIST, CANCEL_1C_CASE_LIST
     body = request.get_json(silent=True) or {}
     mode = (body.get("mode") or "").strip()
     raw_data = body.get("data")
-    if mode not in ("check", "set", "download", "change_filename"):
+    set_info_raw = (body.get("setInfo") or "").strip().lower()
+    stage_delay_sec_raw = body.get("stageDelaySec")
+    validate_before_run = bool(body.get("validateBeforeRun", True))
+    try:
+        stage_delay_sec = float(stage_delay_sec_raw) if stage_delay_sec_raw is not None else 0.0
+        if stage_delay_sec < 0:
+            stage_delay_sec = 0.0
+    except (TypeError, ValueError):
+        stage_delay_sec = 0.0
+    set_info = set_info_raw
+    if mode == "set":
+        allowed_modes = (
+            "court",
+            "ip",
+            "both",
+            "06_ожидание итогов от аутсорсеров",
+            "07_ожидание ответа по досудебному требованию",
+            "09_ожидание решения суда",
+            "11_получение ил",
+            "13_исполнение ил в фссп",
+        )
+        if set_info not in allowed_modes:
+            dbg = {
+                "setInfo": body.get("setInfo"),
+                "setInfoNormalized": set_info,
+                "data_type": type(raw_data).__name__,
+                "body_keys": sorted(list(body.keys())) if isinstance(body, dict) else [],
+            }
+            return jsonify({
+                "ok": False,
+                "error": "Не выбран корректный режим заполнения.",
+                "debug": dbg,
+            }), 400
+    if mode not in ("check", "set", "download", "change_filename", "cancel_case"):
         return jsonify({"ok": False, "error": f"Неизвестный режим: {mode!r}"}), 400
     if mode == "check" and (raw_data is None or (isinstance(raw_data, list) and len(raw_data) == 0)):
         raw_data = CHECK_1C_CASE_LIST
@@ -1621,13 +1869,42 @@ def robot_run():
         raw_data = FILL_1C_DATA_LIST
     if mode == "download" and (raw_data is None or (isinstance(raw_data, list) and len(raw_data) == 0)):
         raw_data = LOAD_1C_CASE_LIST
+    if mode == "cancel_case" and (raw_data is None or (isinstance(raw_data, list) and len(raw_data) == 0)):
+        raw_data = CANCEL_1C_CASE_LIST
     if mode == "check" and (not raw_data or len(raw_data) == 0):
         return jsonify({"ok": False, "error": "Нет дел для проверки. Сначала нажмите «Начать» и загрузите файл с делами."}), 400
     if mode == "set" and (not raw_data or len(raw_data) == 0):
         return jsonify({"ok": False, "error": "Нет данных для заполнения. Сначала нажмите «Начать» и загрузите файл с данными."}), 400
     if mode == "download" and (not raw_data or len(raw_data) == 0):
         return jsonify({"ok": False, "error": "Нет дел для загрузки. Сначала нажмите «Начать» и загрузите файл или вставьте данные."}), 400
+    if mode == "cancel_case" and (not raw_data or len(raw_data) == 0):
+        return jsonify({"ok": False, "error": "Нет дел для удаления. Сначала нажмите «Начать» и вставьте список номеров дел."}), 400
+    # Прокидываем выбор "что заполнять" (court/ip) во все строки для режима set
+    if mode == "set":
+        if isinstance(raw_data, list):
+            for row in raw_data:
+                if isinstance(row, dict):
+                    row["setInfo"] = set_info
+                    row["stageDelaySec"] = stage_delay_sec
+                    row["validateBeforeRun"] = validate_before_run
+        elif isinstance(raw_data, dict):
+            raw_data["setInfo"] = set_info
+            raw_data["stageDelaySec"] = stage_delay_sec
+            raw_data["validateBeforeRun"] = validate_before_run
+
     data = normalize_robot_payload(mode, raw_data if raw_data is not None else {})
+    # Защита: если normalize_robot_payload где-то "потерял" setInfo, допишем в нормализованный payload.
+    if mode == "set":
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict):
+                    item["setInfo"] = set_info
+                    item["stageDelaySec"] = stage_delay_sec
+                    item["validateBeforeRun"] = validate_before_run
+        elif isinstance(data, dict):
+            data["setInfo"] = set_info
+            data["stageDelaySec"] = stage_delay_sec
+            data["validateBeforeRun"] = validate_before_run
     def run_in_thread():
         try:
             run_robot(mode, data)
@@ -1657,7 +1934,47 @@ def robot_download_last_run_results():
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Результаты заполнения"
-    headers = ["Номер дела", "Успешно", "Сообщение"]
+    headers = ["Номер дела", "Успешно", "Сообщение", "Логи этапов"]
+    for c, h in enumerate(headers, 1):
+        ws.cell(row=1, column=c, value=h)
+    for r, row in enumerate(results, 2):
+        ws.cell(row=r, column=1, value=row.get("number_case", ""))
+        ws.cell(row=r, column=2, value="Да" if row.get("ok") else "Нет")
+        ws.cell(row=r, column=3, value=row.get("message", ""))
+        steps = row.get("steps")
+        if isinstance(steps, list):
+            ws.cell(row=r, column=4, value=pyjson.dumps(steps, ensure_ascii=False))
+        else:
+            ws.cell(row=r, column=4, value="")
+    ts = getattr(robot_last_results, "last_timestamp", None)
+    if ts:
+        ws.cell(row=1, column=5, value="Дата запуска")
+        ws.cell(row=2, column=5, value=ts.strftime("%d.%m.%Y %H:%M:%S") if hasattr(ts, "strftime") else str(ts))
+    buf = BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return send_file(
+        buf,
+        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        as_attachment=True,
+        download_name="результаты_заполнения_1С.xlsx",
+    )
+
+
+@app.route("/robot/download-last-cancel-results", methods=["GET"])
+def robot_download_last_cancel_results():
+    """
+    Скачать xlsx с результатами последнего запуска «Удалить дела из 1С»:
+    колонки: Номер дела, Удалено, Сообщение (лог по каждому делу).
+    """
+    results = getattr(robot_last_results, "last_results", None)
+    mode = getattr(robot_last_results, "last_mode", None)
+    if not results or mode != "cancel_case":
+        return jsonify({"error": "Нет результатов последнего удаления для скачивания. Сначала выполните «Удалить дела из 1С»."}), 404
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Результаты удаления"
+    headers = ["Номер дела", "Удалено", "Сообщение"]
     for c, h in enumerate(headers, 1):
         ws.cell(row=1, column=c, value=h)
     for r, row in enumerate(results, 2):
@@ -1675,7 +1992,7 @@ def robot_download_last_run_results():
         buf,
         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         as_attachment=True,
-        download_name="результаты_заполнения_1С.xlsx",
+        download_name="результаты_удаления_дел_1С.xlsx",
     )
 
 
@@ -1718,4 +2035,18 @@ def health():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8080, debug=False)
+    host = "0.0.0.0"
+    port = 8080
+
+    # Открываем браузер на локальном адресе (0.0.0.0 не подходит для webbrowser)
+    def _open_browser():
+        try:
+            webbrowser.open(f"http://127.0.0.1:{port}/", new=1)
+        except Exception:
+            # Если вдруг не получилось открыть браузер, просто игнорируем ошибку
+            pass
+
+    # Стартуем таймер, чтобы браузер открылся после запуска сервера
+    threading.Timer(1.0, _open_browser).start()
+
+    app.run(host=host, port=port, debug=False)

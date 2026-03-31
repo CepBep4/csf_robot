@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from time import sleep
 
 from robot_state import is_stop_requested
 
@@ -15,8 +16,11 @@ COURT_TAB_DELAY = _config.get("delayCourtTab", 0.0)
 DOWNLOAD_CASES_DELAY = _config.get("delayDownloadCases", 180.0)
 STAGE_SWITCH_DELAY = _config.get("delayStageSwitch", 10.0)
 
+# Общая область панели кнопок в интерфейсе 1С (left, top, width, height)
+BUTTON_PANEL_REGION = (1710, 1248, 835, 115)
+
 "Запуск заполнения 1С"
-def hande_case_by_setting_information_to_1c(data: dict):
+def hande_case_by_setting_information_to_1c(data: dict, setInfo: str):
     from worker.search_case import search_case
     from worker.court_tab import court_tab
     from worker.ip_tab import ip_tab
@@ -49,40 +53,54 @@ def hande_case_by_setting_information_to_1c(data: dict):
     if is_stop_requested():
         return "Остановлено по запросу пользователя"
     if sc[1]:
-        #Заполняем вкладку суд
-        ct = court_tab(
-            name_defedant=name_defedant,
-            court=court,
-            date_base=date_base,
-            date_plus_mounth=date_plus_mounth,
-            result_case=result_case,
-            summ_requests_s=summ_requests_s,
-            summ_real_s=summ_real_s,
-            summ_requests_g=summ_requests_g,
-            summ_real_g=summ_real_g,
-            cooldown=COURT_TAB_DELAY,
-        )
-        print(f"Дело: {number_case}\nИнформация: {ct[0]}")
-        if is_stop_requested():
-            return "Остановлено по запросу пользователя"
-        if ct[1]:
-            #Заполняем вкладку исполнительное производство
+        setInfo = (setInfo or "").strip().lower()
+        if setInfo not in ("court", "ip", "both"):
+            return "Ошибка: не выбран режим заполнения (ожидается court, ip или both)"
+
+        ct = None
+        it = None
+
+        if setInfo in ("court", "both"):
+            ct = court_tab(
+                name_defedant=name_defedant,
+                court=court,
+                date_base=date_base,
+                date_plus_mounth=date_plus_mounth,
+                result_case=result_case,
+                summ_requests_s=summ_requests_s,
+                summ_real_s=summ_real_s,
+                summ_requests_g=summ_requests_g,
+                summ_real_g=summ_real_g,
+                cooldown=COURT_TAB_DELAY,
+                one_tab=True if setInfo == "court" else False,
+            )
+            print(f"Дело: {number_case}\nИнформация (СУД): {ct[0]}")
+            if is_stop_requested():
+                return "Остановлено по запросу пользователя"
+            if not ct[1]:
+                "Обрабатываем ошибки по вкладке СУД"
+                return ct[0]
+
+        if setInfo in ("ip", "both"):
             it = ip_tab(
                 view_ip_list=view_ip_list,
                 number_ip_list=number_ip_list,
-                summ=summ+summ_real_g,
+                summ=(summ or 0) + (summ_real_g or 0),
                 data_get_ip_list=data_get_ip_list,
                 cooldown=COURT_TAB_DELAY,
             )
-            print(f"Дело: {number_case}\nИнформация: {it[0]}")
-            if it[1]:
-                return f"Полный цикл заполнения успешно завершён. {it[0]}"
-            else:
+            print(f"Дело: {number_case}\nИнформация (ИП): {it[0]}")
+            if is_stop_requested():
+                return "Остановлено по запросу пользователя"
+            if not it[1]:
                 "Обрабатываем ошибки по вкладке ИП"
                 return it[0]
-        else:
-            "Обрабатываем ошибки по вкладке СУД"
-            return ct[0]
+
+        if setInfo == "both":
+            return f"Полный цикл заполнения (СУД+ИП) завершён. {it[0] if it else ''}".strip()
+        if setInfo == "court":
+            return f"Заполнение вкладки СУД завершено. {ct[0] if ct else ''}".strip()
+        return f"Заполнение вкладки ИП завершено. {it[0] if it else ''}".strip()
     else:
         "Обрабатываем ошибки по поиску ДЕЛА"
         return sc[0]
@@ -139,4 +157,19 @@ def hande_case_by_downloading_information_from_1c(number_case: str):
     if search_case(number_case)[1]:
         if is_stop_requested():
             return
+        sleep(15)
         download_mode(number_case)
+        
+def handle_cancel_case_into_1c(number_case: str):
+    from worker.cancel_case import cansel_case
+    from worker.search_case import search_case
+
+    if is_stop_requested():
+        return
+    if search_case(number_case)[1]:
+        if is_stop_requested():
+            return
+        sleep(15)
+        cansel_case()  
+    
+    

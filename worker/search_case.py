@@ -44,6 +44,8 @@ def search_case(number_case, cooldown = 0):
     sleep(2+cooldown)
     
     "Проверяем что нашли"
+    addToBuffer('none')
+    sleep(1+cooldown)
     hotkey('ctrl', 'c', interval=0.5)
     sleep(1+cooldown)
     if number_case in getFromBuffer():

@@ -53,7 +53,8 @@ def normalize_robot_payload(mode: str, raw: dict | list) -> dict | list:
             out[key] = raw.get(key, raw.get(doc_header))
         for key in ("number_case", "name_defedant", "court", "date_base", "date_plus_mounth",
                     "result_case", "summ_requests_s", "summ_real_s", "summ_requests_g", "summ_real_g",
-                    "view_ip_list", "number_ip_list", "summ", "data_get_ip_list", "cooldown"):
+                    "view_ip_list", "number_ip_list", "summ", "data_get_ip_list", "cooldown", "setInfo",
+                    "stageDelaySec", "validateBeforeRun"):
             if key in raw and key not in out:
                 out[key] = raw[key]
         return out

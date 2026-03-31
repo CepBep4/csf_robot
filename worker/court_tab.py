@@ -1,6 +1,7 @@
 from pyautogui import click, press, pixel, hotkey, screenshot
 from time import sleep
 from worker.utils import addToBuffer, getFromBuffer
+from worker import BUTTON_PANEL_REGION
 
 def check_color(target_rgb, tolerance=5, region=None):
     """
@@ -96,8 +97,6 @@ def find_button_center_in_region(region, target_rgb, tolerance_pct=0.15, toleran
             return (left + cx, top + cy)
     return None
 
-# Область панели кнопок: левый верх (1710, 1248), правый низ (2545, 1363)
-BUTTON_PANEL_REGION = (1710, 1248, 835, 115)
 # Зелёная «Передать в суд» (другой оттенок)
 GREEN_TRANSFER_RGB = (204, 255, 216)
 # Зелёная «В пользу общества», красная «Не в пользу общества»
@@ -115,11 +114,12 @@ def court_tab(
     summ_requests_g: float,  # Запрошенная сумма (госпошлина)
     summ_real_g: float,  # Одобренная сумма (госпошлина)
     cooldown=0,
+    one_tab=False,
 ):   
     "Проваливаемся во вкладку суд"
     for _ in range(21):
         press('tab')
-        sleep(0.5 + cooldown)
+        sleep(0.1 + cooldown)
         
     "Выделяем всё, чтобы скопировать"
     hotkey('ctrl', 'a', interval=0.5)
@@ -135,7 +135,9 @@ def court_tab(
     if getFromBuffer() == 'none':
         press('esc')
         sleep(10+cooldown)
-        return ("Суд ", False)        
+        press('esc')
+        sleep(10+cooldown)
+        return ("Вкладка суд не открылась", False)        
         
     hotkey('ctrl', 'shift', 'f4', interval=0.5)
     sleep(3+cooldown)
@@ -635,38 +637,8 @@ def court_tab(
                 sleep(0.5+cooldown)  
             press('enter')
             sleep(10+cooldown) 
-            
-    _case_to_court=False
-    _case_to_public=False
-    "Кнопка передать в суд — зелёная (204,255,216), допуск ±15"
-    pos = find_button_center_in_region(BUTTON_PANEL_REGION, GREEN_TRANSFER_RGB, tolerance_abs=15, min_pixels=10)
-    if pos:
-        _case_to_court=True
-        click(pos[0], pos[1])
-        sleep(0.5 + cooldown)
-        "Кнопка дело в суде нажата"
-        sleep(20 + cooldown)
-        
-    #Долгое ожидание перед второй кнопкой
-    sleep(30+cooldown)
-    # Кнопка «В пользу общества» (зелёная) или «Не в пользу общества» (красная)
-    target_rgb = RED_BUTTON_RGB if result_case == "отк" else GREEN_BUTTON_RGB
-    pos = find_button_center_in_region(BUTTON_PANEL_REGION, target_rgb, tolerance_abs=15 if "удп" != "отк" else None, min_pixels=10)
-    if pos:
-        _case_to_public=True
-        click(pos[0], pos[1])
-        sleep(0.5 + cooldown)
-        "Кнопка с обществом нажата"
-        sleep(20 + cooldown)
-        
     
-    sleep(25+cooldown)
-    press('esc')
-    sleep(10+cooldown)
-    press('enter')
-    sleep(15+cooldown)
-    
-    return (f"Вкладка суд успешно заполнена. Прожата кнопка передать дело в суд: {_case_to_court}. Прожата кнопка В пользу/Не в пользу общества: {_case_to_public}.", True)       
+    return (f"Вкладка суд успешно заполнена.", True)       
 
 def court_tab_check(cooldown=0):   
     "Проваливаемся во вкладку суд"

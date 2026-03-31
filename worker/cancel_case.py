@@ -1,15 +1,9 @@
-# Загружаем xlsx с отчётом
-from os import name
-from turtle import position, right
-from unittest import result
-from pyautogui import click, moveTo, press, rightClick, write, pixel, doubleClick, hotkey
-from pyautogui import position as p
-from worker.utils import load_from_xlsx, addToBuffer, getFromBuffer, selectAll, paste
+from pyautogui import click, press, pixel
 from time import sleep
+from worker import BUTTON_PANEL_REGION
 
-from pyautogui import click, press, pixel, hotkey, screenshot
+from pyautogui import click, press, pixel, screenshot
 from time import sleep
-from worker.utils import addToBuffer, getFromBuffer
 
 def check_color(target_rgb, tolerance=5, region=None):
     """
@@ -105,25 +99,35 @@ def find_button_center_in_region(region, target_rgb, tolerance_pct=0.15, toleran
             return (left + cx, top + cy)
     return None
 
-# Область панели кнопок: левый верх (1710, 1248), правый низ (2545, 1363)
-BUTTON_PANEL_REGION = (1710, 1248, 835, 115)
 # Зелёная «Передать в суд» (другой оттенок)
-CANCEL_CASE = (232, 232, 232)
+CANCEL_CASE = (253, 162, 121)
 
-def cansel_button(cooldown=0):
+def cansel_case(cooldown=0):
     pos = find_button_center_in_region(BUTTON_PANEL_REGION, CANCEL_CASE, tolerance_abs=15, min_pixels=10)
     if pos:
         click(pos[0], pos[1])
         "Кнопка ИП получено"
         sleep(30+cooldown)
-        press('ecs')
+        press('esc')
         sleep(10+cooldown)
         return ("Дело успешно отменено", True)
     else:
+        press('esc')
+        sleep(10+cooldown)
+        press('esc')
+        sleep(10+cooldown)
         return ("Кнопка не обнаружена", False)
 
-pos = find_button_center_in_region(BUTTON_PANEL_REGION, CANCEL_CASE, tolerance_abs=15, min_pixels=10)
-if pos:
-    moveTo(pos[0], pos[1])
+# print(pixel(2399,1342))
+# (253, 162, 121)
 
-#(232, 232, 232)
+# 000037838
+# 000037977
+# 000038373
+# 000038375
+# 000038380
+# 000038521
+# 000038583
+# 000038677
+# 000038792
+

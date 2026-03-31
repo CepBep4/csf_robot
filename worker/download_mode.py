@@ -4,7 +4,10 @@ from worker.utils import addToBuffer
 
 def download_mode(number_case, cooldown=0, cooldown_download = 180):
     "Нажимаем на скачать дело"
-    click(273,268)
+    for _ in range(2):
+        hotkey("shift",'tab', interval=0.5)
+        sleep(0.1+cooldown)
+    press('enter')
     sleep(cooldown_download+cooldown)
     
     "Выделяем всё, чтобы заменить"

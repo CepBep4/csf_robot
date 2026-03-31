@@ -12,7 +12,7 @@ def run(mode: str, data: dict | list):
     log.info("Старт: mode=%s", mode)
     try:
         out = interface_start(mode, data)
-        if mode == "set" and out is not None:
+        if mode in ("set", "download", "cancel_case") and out is not None:
             set_last_run(mode, out)
         log.info("Завершено: mode=%s", mode)
     except Exception as e:
